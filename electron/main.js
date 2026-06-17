@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, nativeImage, shell } from 'electron'
+import { app, BrowserWindow, dialog, nativeImage, nativeTheme, shell } from 'electron'
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import http from 'node:http'
@@ -231,8 +231,9 @@ function createWindow(baseUrl) {
     minWidth: 1080,
     minHeight: 680,
     title: 'Volio Desktop',
-    backgroundColor: '#f6f6f7',
+    titleBarStyle: 'hidden',
     trafficLightPosition: { x: 14, y: 14 },
+    vibrancy: 'sidebar',
     icon: iconPath,
     webPreferences: {
       preload: path.join(electronDir, 'preload.js'),
@@ -280,6 +281,7 @@ if (process.platform === 'darwin') {
 app.whenReady().then(async () => {
   resetLaunchLog()
   try {
+    nativeTheme.themeSource = 'light'
     const baseUrl = await startBackend()
     if (process.env.VOLIO_ELECTRON_SMOKE === '1') {
       appendLaunchLog(`Smoke test passed at ${baseUrl}`)

@@ -2482,7 +2482,7 @@ def create_ios_pairing_session(request: Request) -> dict[str, Any]:
         "host_name": host_name,
     })
     qr_bytes = io.BytesIO()
-    qr_img = qrcode.make(json.dumps(pairing_payload, ensure_ascii=False), box_size=8, border=2)
+    qr_img = qrcode.make(pairing_url, box_size=8, border=2)
     qr_img.save(qr_bytes, format="PNG")
     qr_b64 = base64.b64encode(qr_bytes.getvalue()).decode("ascii")
     return {
@@ -2518,7 +2518,7 @@ def ios_bootstrap(request: Request) -> dict[str, Any]:
             con.execute("SELECT * FROM children WHERE id != ? ORDER BY name", (UNASSIGNED_CHILD_ID,)).fetchall()
         )
         settings = current_settings(con)
-        latest = artwork_query(con, base_url=base_url)[:30]
+        latest = artwork_query(con, base_url=base_url)
     return {
         "desktop": {
             "name": "Volio Desktop",

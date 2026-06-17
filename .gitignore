@@ -18,6 +18,13 @@ Volio_icon.png
 .gstack/
 .playwright-mcp/
 
+# Python
+__pycache__/
+*.pyc
+
 # Logs and OS files
 *.log
 .DS_Store
+
+# Xcode user state
+xcuserdata/

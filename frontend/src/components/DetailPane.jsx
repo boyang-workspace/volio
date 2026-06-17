@@ -78,15 +78,15 @@ export default function DetailPane() {
 
   if (!w) {
     return (
-      <aside className="border-l border-[#e5e5e5] bg-white overflow-hidden flex flex-col">
-        <div className="flex-1 flex items-center justify-center text-[#a1a1a6] text-xs font-sans italic">
+      <aside className="border-l border-[#e5e5e5]/60 bg-white/40 backdrop-blur-2xl overflow-hidden flex flex-col [-webkit-app-region:drag]">
+        <div className="flex-1 flex items-center justify-center text-[#a1a1a6] text-xs font-sans italic [-webkit-app-region:no-drag]">
           {t('selectArtwork')}
         </div>
       </aside>
     )
   }
 
-  const path = w.display_url || w.processed_url || w.original_url || w.source || w.path || ''
+  const path = w.original_url || w.display_url || w.path || ''
   const title = w.title || 'Untitled'
   const date = w.artwork_date || ''
   const child = w.child_name || t('unassigned')
@@ -194,14 +194,14 @@ export default function DetailPane() {
   }
 
   return (
-    <aside className="border-l border-[#e5e5e5] bg-white overflow-hidden flex flex-col">
-      <div className="flex-1 overflow-y-auto">
+      <aside className="border-l border-[#e5e5e5]/60 bg-white overflow-hidden flex flex-col">
+      <div className="flex-1 overflow-y-auto [-webkit-app-region:no-drag]">
         <div
-          className="w-full grid place-items-center bg-[#f0f0f0] h-[280px] cursor-zoom-in border-b border-[#e5e5e5] relative overflow-hidden"
+          className="w-full grid place-items-center bg-[#f0f0f0] h-[280px] cursor-zoom-in border-b border-[#e5e5e5] relative overflow-hidden [-webkit-app-region:drag]"
           onClick={() => setLightboxSrc({ id: w.id, src: path })}
         >
           <img
-            className="max-w-full max-h-[280px] object-contain block transition-transform duration-300 hover:scale-[1.02]"
+            className="max-w-full max-h-[280px] object-contain block transition-transform duration-300 hover:scale-[1.02] [-webkit-app-region:no-drag]"
             src={path}
             alt={title}
           />
@@ -327,7 +327,7 @@ export default function DetailPane() {
           </div>
         </div>
       </div>
-      <div className="shrink-0 border-t border-[#e5e5e5] bg-white/95 backdrop-blur px-4 py-3">
+      <div className="shrink-0 border-t border-[#e5e5e5] bg-white/60 backdrop-blur-xl px-4 py-3">
         <div className="flex gap-2">
           <button
             type="button"

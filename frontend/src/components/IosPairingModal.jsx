@@ -45,13 +45,7 @@ export default function IosPairingModal() {
   const copyPayload = async () => {
     if (!pairing) return
     try {
-      await navigator.clipboard.writeText(JSON.stringify({
-        type: pairing.type,
-        version: pairing.version,
-        base_url: pairing.base_url,
-        token: pairing.token,
-        host_name: pairing.host_name,
-      }))
+      await navigator.clipboard.writeText(pairing.pairing_url)
       toast(t('copyPairingPayload'))
     } catch {
       toast(pairing.base_url)
