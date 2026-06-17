@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>Volio Mobile</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh;
+    background: #eceff3;
+    color: #20242a;
+    font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    padding: 20px; gap: 16px;
+  }
+  .card {
+    width: 100%; max-width: 400px;
+    background: #fff;
+    border: 1px solid #d9dee6;
+    border-radius: 12px;
+    padding: 24px;
+    text-align: center;
+    box-shadow: 0 18px 44px rgba(18,24,31,0.14);
+  }
+  h1 { margin: 0 0 4px; font-size: 22px; }
+  .sub { color: #6d7580; font-size: 13px; margin: 0 0 20px; }
+  .label { color: #6d7580; font-size: 11px; font-weight: 650; margin-bottom: 6px; }
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    width: 100%; min-height: 48px;
+    border-radius: 10px; border: 1px solid #d9dee6;
+    background: #fff; color: #20242a;
+    font-size: 16px; font-weight: 600;
+    cursor: pointer; padding: 12px 16px;
+    transition: background 0.12s;
+  }
+  .btn-primary {
+    background: #3d7df2; border-color: #3d7df2; color: #fff;
+  }
+  .btn-primary:hover { background: #2466dd; }
+  .btn:disabled { opacity: 0.5; cursor: default; }
+  .status {
+    margin-top: 14px; padding: 10px;
+    border-radius: 8px; font-size: 13px;
+    color: #6d7580;
+  }
+  .status.success { background: #e8f0ff; color: #1f5fc7; }
+  .status.error { background: #fff0ee; color: #b93b34; }
+  .status.uploading { background: #fff5e1; color: #a76f13; }
+  input[type="file"] { display: none; }
+  .done-icon { font-size: 48px; margin-bottom: 8px; }
+  .hidden { display: none !important; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #1a1d23; color: #e4e8ed; }
+    .card { background: #262a32; border-color: #37404d; }
+    .btn { background: #2d333d; border-color: #37404d; color: #e4e8ed; }
+    .btn-primary { background: #3d7df2; border-color: #3d7df2; color: #fff; }
+    .status { color: #9aa3ad; }
+    .status.success { background: #1a2a4a; color: #7aa4f5; }
+    .status.error { background: #3a1a18; color: #f07a73; }
+    .status.uploading { background: #3a2e14; color: #f0c873; }
+  }
+</style>
+</head>
+<body>
+<div class="card" id="loadScreen">
+  <div class="status">Connecting to Volio...</div>
+</div>
+
+<div class="card hidden" id="uploadScreen">
+  <h1>Volio</h1>
+  <p class="sub" id="childLabel">Importing as <strong>Child</strong></p>
+  <div class="label">Take a photo or choose from library</div>
+  <button class="btn btn-primary" id="captureBtn">Open Camera / Album</button>
+  <input type="file" id="fileInput" accept="image/*" multiple />
+  <div class="status" id="uploadStatus"></div>
+</div>
+
+<div class="card hidden" id="doneScreen">
+  <div class="done-icon">&#10003;</div>
+  <h1>Uploaded!</h1>
+  <p class="sub" id="doneCount">0 photos saved</p>
+  <button class="btn btn-primary" id="moreBtn">Add More Photos</button>
+</div>
+
+<script>
+function $(id) { return document.getElementById(id); }
+
+const params = new URLSearchParams(window.location.search);
+const token = params.get("t");
+
+async function init() {
+  if (!token) {
+    showStatus("error", "Invalid link. Scan the QR code again.");
+    return;
+  }
+  try {
+    const res = await fetch(`/api/mobile/session/${encodeURIComponent(token)}`, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) throw new Error("Session expired");
+    const data = await res.json();
+    $("childLabel").innerHTML = `Importing as <strong>${esc(data.child_name)}</strong>`;
+    $("loadScreen").classList.add("hidden");
+    $("uploadScreen").classList.remove("hidden");
+  } catch {
+    showStatus("error", "Session expired. Scan the QR code from your Mac again.");
+  }
+}
+
+function esc(s) { return String(s ?? "").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;"); }
+
+function showStatus(type, msg) {
+  const el = $("uploadStatus");
+  el.className = "status " + type;
+  el.textContent = msg;
+}
+
+$("captureBtn").addEventListener("click", () => $("fileInput").click());
+$("moreBtn").addEventListener("click", () => {
+  $("doneScreen").classList.add("hidden");
+  $("uploadScreen").classList.remove("hidden");
+});
+
+$("fileInput").addEventListener("change", async (e) => {
+  const files = e.target.files;
+  if (!files.length) return;
+  $("captureBtn").disabled = true;
+  showStatus("uploading", `Uploading ${files.length} photo${files.length > 1 ? "s" : ""}...`);
+
+  const form = new FormData();
+  form.append("token", token);
+  for (const f of files) form.append("files", f, f.name);
+
+  try {
+    const res = await fetch("/api/mobile/upload", { method: "POST", body: form, signal: AbortSignal.timeout(120000) });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Upload failed");
+    }
+    const data = await res.json();
+    $("doneCount").textContent = `${data.imported} photo${data.imported > 1 ? "s" : ""} saved to ${esc(data.child_name)}.`;
+    $("uploadScreen").classList.add("hidden");
+    $("doneScreen").classList.remove("hidden");
+    $("fileInput").value = "";
+  } catch (err) {
+    showStatus("error", err.message || "Upload failed. Try again.");
+  }
+  $("captureBtn").disabled = false;
+});
+
+init();
+</script>
+</body>
+</html>

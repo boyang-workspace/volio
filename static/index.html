@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Volio</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">V</div>
+          <span class="brand-name">Volio</span>
+        </div>
+
+        <div class="sidebar-section">
+          <button class="btn btn--primary btn--sm" type="button" id="openImport">Import New Photos</button>
+        </div>
+        <div class="sidebar-section">
+          <button class="btn btn--tertiary btn--sm" type="button" id="openPhoneImport">Phone Import</button>
+        </div>
+
+        <nav class="sidebar-nav">
+          <button class="nav-item active" type="button" data-nav="all">All</button>
+
+          <div class="nav-group" id="smartGroup">
+            <div class="nav-group-header" id="smartToggle">Smart Portfolio</div>
+            <div class="nav-group-body" id="smartBody"></div>
+          </div>
+        </nav>
+
+        <div class="sidebar-spacer"></div>
+
+        <div class="children-strip" id="childStrip"></div>
+      </aside>
+
+      <section class="main-pane">
+        <div class="works-toolbar">
+          <div class="toolbar-left">
+            <input class="input search-field" id="searchInput" placeholder="Search..." autocomplete="off" />
+          </div>
+          <div class="view-switch">
+            <button class="view-btn active" type="button" data-view="grid">Grid</button>
+            <button class="view-btn" type="button" data-view="masonry">Masonry</button>
+            <button class="view-btn" type="button" data-view="timeline">Timeline</button>
+          </div>
+        </div>
+        <div class="content-scroll" id="contentArea"></div>
+      </section>
+
+      <aside class="detail-pane" id="detailPane">
+        <div class="detail-scroll" id="detailScroll"></div>
+      </aside>
+    </main>
+
+    <div class="lightbox" id="lightbox" hidden>
+      <div class="lightbox-backdrop" id="lightboxBackdrop"></div>
+      <img class="lightbox-image" id="lightboxImage" src="" alt="" />
+      <button class="lightbox-close" id="lightboxClose">X</button>
+    </div>
+
+    <div class="modal-backdrop" id="importModal" hidden>
+      <section class="modal" role="dialog" aria-labelledby="importTitle">
+        <div class="modal-head">
+          <h2 id="importTitle">Import Photos</h2>
+          <button class="btn btn--icon" type="button" id="closeImport" title="Close">X</button>
+        </div>
+        <form class="modal-body" id="importForm">
+          <label class="label">
+            Child name
+            <input class="input" name="child_name" id="childName" required placeholder="e.g. Emma" />
+          </label>
+          <input id="fileInput" type="file" accept="image/*" multiple />
+          <div class="modal-footer">
+            <button class="btn btn--primary" type="submit">Import</button>
+            <span id="importStatus" class="status-text"></span>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <div class="modal-backdrop" id="qrModal" hidden>
+      <section class="modal" role="dialog" aria-labelledby="qrTitle">
+        <div class="modal-head">
+          <div>
+            <h2 id="qrTitle">Phone Import</h2>
+            <p>Scan with your phone camera to open the upload page.</p>
+          </div>
+          <button class="btn btn--icon" type="button" id="closeQr" title="Close">X</button>
+        </div>
+        <div class="qr-body">
+          <div class="qr-image-wrap" id="qrImageWrap"></div>
+          <p class="qr-url" id="qrUrl"></p>
+          <p class="qr-hint">Make sure your phone is on the same Wi-Fi as this Mac.</p>
+        </div>
+      </section>
+    </div>
+
+    <div class="toast" id="toast" hidden></div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,23 @@
+# Node
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Volio local data
+.volio/
+data/
+library/
+exports/
+
+# macOS app build
+Volio.app/
+Volio.icns
+Volio_icon.png
+
+# Agent / tool config
+.gstack/
+.playwright-mcp/
+
+# Logs and OS files
+*.log
+.DS_Store

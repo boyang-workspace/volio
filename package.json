@@ -1,0 +1,19 @@
+{
+  "name": "volio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "electron/main.js",
+  "description": "Local-first creative archive for children's artwork.",
+  "scripts": {
+    "build:frontend": "npm --prefix frontend run build",
+    "electron": "npm run build:frontend && electron .",
+    "electron:launch": "electron .",
+    "web": "./scripts/start_volio.command",
+    "lint": "npm --prefix frontend run lint",
+    "check": "npm run lint && npm run build:frontend && python3 -m py_compile server/main.py && node --check electron/main.js"
+  },
+  "devDependencies": {
+    "electron": "^37.10.3"
+  }
+}
