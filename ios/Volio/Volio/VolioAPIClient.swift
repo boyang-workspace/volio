@@ -29,6 +29,13 @@ struct VolioAPIClient {
         return try await request("/api/ios/artworks/\(id)", method: "PATCH", body: body)
     }
 
+    func deleteArtwork(id: String) async throws {
+        var request = authorizedRequest(path: "/api/ios/artworks/\(id)")
+        request.httpMethod = "DELETE"
+        let (_, response) = try await URLSession.shared.data(for: request)
+        try validate(response)
+    }
+
     func analyzeArtwork(id: String) async throws {
         let _: EmptyResponse = try await request("/api/ios/artworks/\(id)/analyze", method: "POST", body: Data("{}".utf8))
     }
@@ -55,8 +62,9 @@ struct VolioAPIClient {
         dateNote: String,
         childAgeMonths: Int?,
         workType: String,
-        autoAnalyze: Bool
-    ) async throws {
+        autoAnalyze: Bool,
+        clientWorkId: String? = nil
+    ) async throws -> ImportResponse {
         let boundary = "Boundary-\(UUID().uuidString)"
         var body = Data()
         body.appendMultipartField(name: "token", value: token, boundary: boundary)
@@ -67,6 +75,7 @@ struct VolioAPIClient {
         body.appendMultipartField(name: "date_precision", value: datePrecision, boundary: boundary)
         body.appendMultipartField(name: "date_note", value: dateNote, boundary: boundary)
         body.appendMultipartField(name: "child_age_months", value: childAgeMonths.map(String.init) ?? "", boundary: boundary)
+        body.appendMultipartField(name: "client_work_id", value: clientWorkId ?? "", boundary: boundary)
         body.appendMultipartField(name: "work_type", value: workType, boundary: boundary)
         body.appendMultipartField(name: "auto_analyze", value: autoAnalyze ? "true" : "false", boundary: boundary)
         for photo in photos {
@@ -82,8 +91,49 @@ struct VolioAPIClient {
         request.httpMethod = "POST"
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
-        let (_, response) = try await URLSession.shared.data(for: request)
-        try validate(response)
+        return try await send(request)
+    }
+
+    func createProcessingJob(work: LocalWork, imageData: Data) async throws -> ProcessorJobResponse {
+        let boundary = "Boundary-\(UUID().uuidString)"
+        var body = Data()
+        body.appendMultipartField(name: "token", value: token, boundary: boundary)
+        body.appendMultipartField(name: "work_id", value: work.id, boundary: boundary)
+        body.appendMultipartField(name: "work_type", value: work.workType, boundary: boundary)
+        body.appendMultipartField(name: "created_around_kind", value: work.createdAroundKind, boundary: boundary)
+        body.appendMultipartField(name: "created_around_label", value: work.createdAroundLabel, boundary: boundary)
+        body.appendMultipartField(name: "created_around_year", value: work.createdAroundYear.map(String.init) ?? "", boundary: boundary)
+        body.appendMultipartField(name: "created_around_month", value: work.createdAroundMonth.map(String.init) ?? "", boundary: boundary)
+        body.appendMultipartField(name: "created_around_season", value: work.createdAroundSeason ?? "", boundary: boundary)
+        body.appendMultipartField(name: "created_around_age_months", value: work.createdAroundAgeMonths.map(String.init) ?? "", boundary: boundary)
+        body.appendMultipartField(name: "title", value: work.title ?? "", boundary: boundary)
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"\(work.id)-processor.jpg\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: image/jpeg\r\n\r\n".data(using: .utf8)!)
+        body.append(imageData)
+        body.append("\r\n".data(using: .utf8)!)
+        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+
+        var request = authorizedRequest(path: "/api/ios/process/jobs")
+        request.httpMethod = "POST"
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+        return try await send(request)
+    }
+
+    func processingJob(id: String) async throws -> ProcessorJobResponse {
+        try await get("/api/ios/process/jobs/\(id)")
+    }
+
+    func imageData(from absoluteURL: String) async throws -> Data {
+        guard let url = URL(string: absoluteURL) else {
+            throw VolioAPIError.server("Invalid image URL.")
+        }
+        var request = authorizedRequest(url: url)
+        request.httpMethod = "GET"
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validate(response, data: data)
+        return data
     }
 
     private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> T {

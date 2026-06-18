@@ -16,6 +16,38 @@
 		100000000000000000000107 /* LibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000007 /* LibraryView.swift */; };
 		100000000000000000000108 /* ArtworkDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000008 /* ArtworkDetailView.swift */; };
 		100000000000000000000109 /* CaptureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000009 /* CaptureView.swift */; };
+		100000000000000000000110 /* ImageStorage.swift in Sources */ = {
+			isa = PBXBuildFile;
+			fileRef = 100000000000000000000013 /* ImageStorage.swift */;
+		};
+		100000000000000000000111 /* LocalWork.swift in Sources */ = {
+			isa = PBXBuildFile;
+			fileRef = 100000000000000000000014 /* LocalWork.swift */;
+		};
+		100000000000000000000112 /* ShareCardView.swift in Sources */ = {
+			isa = PBXBuildFile;
+			fileRef = 100000000000000000000015 /* ShareCardView.swift */;
+		};
+		100000000000000000000113 /* MacTypes.swift in Sources */ = {
+			isa = PBXBuildFile;
+			fileRef = 100000000000000000000016 /* MacTypes.swift */;
+		};
+		100000000000000000000114 /* BatchRevealView.swift in Sources */ = {
+			isa = PBXBuildFile;
+			fileRef = 100000000000000000000017 /* BatchRevealView.swift */;
+		};
+		100000000000000000000115 /* EditionView.swift in Sources */ = {
+			isa = PBXBuildFile;
+			fileRef = 100000000000000000000018 /* EditionView.swift */;
+		};
+		100000000000000000000116 /* OnboardingView.swift in Sources */ = {
+			isa = PBXBuildFile;
+			fileRef = 100000000000000000000019 /* OnboardingView.swift */;
+		};
+		100000000000000000000120 /* StackCamera.swift in Sources */ = {
+			isa = PBXBuildFile;
+			fileRef = 100000000000000000000020 /* StackCamera.swift */;
+		};
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -31,6 +63,54 @@
 		100000000000000000000010 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		100000000000000000000011 /* Volio.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Volio.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		100000000000000000000012 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		100000000000000000000013 /* ImageStorage.swift */ = {
+			isa = PBXFileReference;
+			lastKnownFileType = sourcecode.swift;
+			path = ImageStorage.swift;
+			sourceTree = "<group>";
+		};
+		100000000000000000000014 /* LocalWork.swift */ = {
+			isa = PBXFileReference;
+			lastKnownFileType = sourcecode.swift;
+			path = LocalWork.swift;
+			sourceTree = "<group>";
+		};
+		100000000000000000000015 /* ShareCardView.swift */ = {
+			isa = PBXFileReference;
+			lastKnownFileType = sourcecode.swift;
+			path = ShareCardView.swift;
+			sourceTree = "<group>";
+		};
+		100000000000000000000016 /* MacTypes.swift */ = {
+			isa = PBXFileReference;
+			lastKnownFileType = sourcecode.swift;
+			path = MacTypes.swift;
+			sourceTree = "<group>";
+		};
+		100000000000000000000017 /* BatchRevealView.swift */ = {
+			isa = PBXFileReference;
+			lastKnownFileType = sourcecode.swift;
+			path = BatchRevealView.swift;
+			sourceTree = "<group>";
+		};
+		100000000000000000000018 /* EditionView.swift */ = {
+			isa = PBXFileReference;
+			lastKnownFileType = sourcecode.swift;
+			path = EditionView.swift;
+			sourceTree = "<group>";
+		};
+		100000000000000000000019 /* OnboardingView.swift */ = {
+			isa = PBXFileReference;
+			lastKnownFileType = sourcecode.swift;
+			path = OnboardingView.swift;
+			sourceTree = "<group>";
+		};
+		100000000000000000000020 /* StackCamera.swift */ = {
+			isa = PBXFileReference;
+			lastKnownFileType = sourcecode.swift;
+			path = StackCamera.swift;
+			sourceTree = "<group>";
+		};
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -66,7 +146,15 @@
 				100000000000000000000008 /* ArtworkDetailView.swift */,
 				100000000000000000000009 /* CaptureView.swift */,
 				100000000000000000000010 /* Info.plist */,
-			);
+				100000000000000000000013 /* ImageStorage.swift */,
+				100000000000000000000014 /* LocalWork.swift */,
+				100000000000000000000015 /* ShareCardView.swift */,
+				100000000000000000000016 /* MacTypes.swift */,
+				100000000000000000000017 /* BatchRevealView.swift */,
+				100000000000000000000018 /* EditionView.swift */,
+				100000000000000000000019 /* OnboardingView.swift */,
+				100000000000000000000020 /* StackCamera.swift */,
+);
 			path = Volio;
 			sourceTree = "<group>";
 		};
@@ -155,7 +243,12 @@
 				100000000000000000000107 /* LibraryView.swift in Sources */,
 				100000000000000000000108 /* ArtworkDetailView.swift in Sources */,
 				100000000000000000000109 /* CaptureView.swift in Sources */,
-			);
+				100000000000000000000110 /* ImageStorage.swift in Sources */,
+				100000000000000000000111 /* LocalWork.swift in Sources */,
+				100000000000000000000112 /* ShareCardView.swift in Sources */,
+				100000000000000000000113 /* MacTypes.swift in Sources */,
+				100000000000000000000120 /* StackCamera.swift in Sources */,
+);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */

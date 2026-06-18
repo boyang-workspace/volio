@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 
 @main
 struct VolioApp: App {
@@ -9,5 +10,6 @@ struct VolioApp: App {
             ContentView()
                 .environment(session)
         }
+        .modelContainer(for: [LocalWork.self, LocalProfile.self, LocalAsset.self, LocalProcessingJob.self])
     }
 }

@@ -28,6 +28,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [lightboxSrc, setLightboxSrc] = useState(null)
   const [settings, setSettings] = useState(null)
+  const [processor, setProcessor] = useState({})
   const [mobileSession, setMobileSession] = useState(() => {
     try {
       const data = JSON.parse(localStorage.getItem('volioMobileSession') || 'null')
@@ -285,9 +286,11 @@ export default function App() {
         const state = await loadState()
         if (cancelled) return
         const counts = state?.counts || {}
+        setProcessor(state?.processor || {})
         const latest = state?.latest || []
         const signature = JSON.stringify({
           counts,
+          processor: state?.processor || {},
           revision: state?.revision || null,
           latest: latest.map(work => [work.id, work.updated_at, work.ai_status, work.deleted_at]),
         })
@@ -316,7 +319,7 @@ export default function App() {
     currentNav, currentTagFilter, currentChild,
     currentView, selectedWorkId, selectedWork, searchQuery,
     importModalOpen, phoneImportOpen, iosPairingOpen, settingsOpen, lightboxSrc,
-    settings, mobileSession, iosPairingSession,
+    settings, mobileSession, iosPairingSession, processor,
     setCurrentNav, setCurrentChild, setCurrentView,
     setSearchQuery, setImportModalOpen, setPhoneImportOpen,
     setIosPairingOpen,
@@ -331,7 +334,7 @@ export default function App() {
     currentNav, currentTagFilter, currentChild,
     currentView, selectedWorkId, selectedWork, searchQuery,
     importModalOpen, phoneImportOpen, iosPairingOpen, settingsOpen, lightboxSrc,
-    settings, mobileSession, iosPairingSession,
+    settings, mobileSession, iosPairingSession, processor,
     setCurrentNav, setCurrentChild, setCurrentView,
     setSearchQuery, setImportModalOpen, setPhoneImportOpen,
     setIosPairingOpen,

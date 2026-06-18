@@ -2,228 +2,425 @@ import SwiftUI
 
 struct ArtworkDetailView: View {
     @Environment(VolioSession.self) private var session
-    @State var artwork: Artwork
-    @State private var showingEditor = false
-    @State private var isAnalyzing = false
+    @State var work: LocalWork
+    @State private var showEditor = false
+    @State private var showShareCard = false
+    @State private var quoteText = ""
+
+    private let accentColor = VolioTheme.accent
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                AsyncImage(url: URL(string: artwork.displayAbsoluteURL ?? artwork.originalAbsoluteURL ?? "")) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().scaledToFit()
-                    case .failure:
-                        ContentUnavailableView("Image unavailable", systemImage: "photo")
-                    default:
-                        ProgressView().frame(maxWidth: .infinity, minHeight: 240)
-                    }
+            VStack(spacing: 20) {
+                // Image
+                if let path = work.originalPath, let data = try? Data(contentsOf: URL(fileURLWithPath: path)), let image = UIImage(data: data) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                        .shadow(color: .black.opacity(0.08), radius: 12, y: 4)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 8)
                 }
-                .clipShape(RoundedRectangle(cornerRadius: 18))
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(artwork.title?.isEmpty == false ? artwork.title! : "Untitled artwork")
-                        .font(.title2.bold())
-                    Text([artwork.childName, artwork.childAgeLabel ?? artwork.createdAroundLabel, artwork.workType?.capitalized, artwork.aiStatus].compactMap { $0 }.joined(separator: " · "))
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-
-                HStack(spacing: 10) {
-                    if let age = artwork.childAgeLabel {
-                        DetailChip(icon: "figure.child", title: age)
+                    HStack(alignment: .top, spacing: 10) {
+                        Text(work.displayTitle)
+                            .font(.title2.bold())
+                            .foregroundStyle(VolioTheme.ink)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        aiPill
                     }
-                    if let created = artwork.createdAroundLabel {
-                        DetailChip(icon: "calendar", title: created)
-                    }
-                }
 
-                if let description = artwork.description, !description.isEmpty {
-                    DetailBlock(title: "Brief", text: description)
+                    HStack(spacing: 6) {
+                        Text(work.createdAroundLabel)
+                        Text("·")
+                        Text(work.workType.capitalized)
+                        if let age = work.ageAtCreationMonths ?? work.createdAroundAgeMonths {
+                            Text("·")
+                            Text(ageLabel(age))
+                        }
+                    }
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(VolioTheme.mutedInk)
                 }
-                if let longDescription = artwork.longDescription, !longDescription.isEmpty {
-                    DetailBlock(title: "Description", text: longDescription)
+                .padding(.horizontal, 16)
+
+                // Actions
+                HStack(spacing: 14) {
+                    Button {
+                        session.toggleFavorite(work)
+                    } label: {
+                        Label(work.isFavorite ? "Favorited" : "Favorite", systemImage: work.isFavorite ? "heart.fill" : "heart")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(work.isFavorite ? .red : nil)
+                    .controlSize(.large)
+
+                    Button {
+                        showShareCard = true
+                    } label: {
+                        Label("Share Card", systemImage: "square.and.arrow.up")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(accentColor)
+                    .controlSize(.large)
                 }
-                if let quote = artwork.childQuote, !quote.isEmpty {
-                    DetailBlock(title: "Child Quote", text: quote)
-                }
-                if let note = artwork.parentNote, !note.isEmpty {
-                    DetailBlock(title: "Parent Note", text: note)
-                }
-                if let tags = artwork.tags, !tags.isEmpty {
-                    FlowTags(tags: tags)
-                }
+                .padding(.horizontal, 16)
+
+                processingCard
+
+                detailSections
             }
-            .padding(16)
+            .padding(.bottom, 24)
         }
+        .background(VolioTheme.paper)
         .navigationTitle("Artwork")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItemGroup(placement: .topBarTrailing) {
+            ToolbarItem(placement: .topBarTrailing) {
                 Button {
-                    Task { await analyze() }
+                    showEditor = true
                 } label: {
-                    if isAnalyzing {
-                        ProgressView()
-                    } else {
-                        Image(systemName: "sparkles")
+                    Text("Edit")
+                        .font(.subheadline.weight(.semibold))
+                }
+            }
+        }
+        .toolbar(.hidden, for: .tabBar)
+        .sheet(isPresented: $showEditor) {
+            ArtworkEditorView(work: work) { updated in
+                work = updated
+            }
+        }
+        .sheet(isPresented: $showShareCard) {
+            ShareCardView(work: work)
+        }
+        .onAppear {
+            session.isShowingDetail = true
+        }
+        .task(id: work.remoteArtworkId) {
+            await session.refreshWorkFromMac(work)
+        }
+        .onDisappear {
+            session.isShowingDetail = false
+        }
+    }
+
+    private var aiPill: some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(processingColor)
+                .frame(width: 7, height: 7)
+            Text("AI")
+                .font(.caption.weight(.bold))
+        }
+        .foregroundStyle(processingColor)
+        .padding(.horizontal, 9)
+        .frame(height: 26)
+        .background(processingColor.opacity(0.12), in: Capsule())
+    }
+
+    private var detailSections: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if let brief = work.aiBrief, !brief.isEmpty {
+                DetailSection("Brief") {
+                    Text(brief)
+                        .font(.body)
+                        .foregroundStyle(VolioTheme.ink)
+                }
+            }
+
+            if let description = work.aiDescription, !description.isEmpty, description != work.aiBrief {
+                DetailSection("Description") {
+                    Text(description)
+                        .font(.body)
+                        .foregroundStyle(VolioTheme.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            DetailSection("Tags") {
+                let tags = combinedTags
+                if tags.isEmpty {
+                    Text("No tags")
+                        .font(.subheadline)
+                        .foregroundStyle(VolioTheme.mutedInk)
+                } else {
+                    FlowLayout(spacing: 8, rowSpacing: 8) {
+                        ForEach(tags, id: \.self) { tag in
+                            Text(tag)
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 10)
+                                .frame(height: 30)
+                                .background(VolioTheme.blue.opacity(0.10), in: Capsule())
+                                .foregroundStyle(VolioTheme.blue)
+                        }
                     }
                 }
-                Button("Edit") {
-                    showingEditor = true
+            }
+
+            DetailSection("Personal Notes") {
+                VStack(spacing: 0) {
+                    DetailInfoRow(label: "Child Quote", value: work.childQuote)
+                    DetailInfoRow(label: "Parent Note", value: work.note)
+                    DetailInfoRow(label: "Story", value: nil)
+                }
+            }
+
+            DetailSection("Artwork Info") {
+                VStack(spacing: 0) {
+                    DetailInfoRow(label: "Child", value: session.profile.name)
+                    DetailInfoRow(label: "Date", value: work.createdAroundLabel)
+                    DetailInfoRow(label: "Batch", value: nil)
+                    DetailInfoRow(label: "Type", value: work.workType.capitalized)
+                    DetailInfoRow(label: "Stage", value: nil)
+                    DetailInfoRow(label: "Medium", value: work.aiMaterials)
+                    DetailInfoRow(label: "Size", value: imageDimensions)
+                    DetailInfoRow(label: "Status", value: work.physicalStatus)
+                    DetailInfoRow(label: "AI", value: processingTitle)
+                    DetailInfoRow(label: "Locale", value: nil)
+                    DetailInfoRow(label: "File", value: fileName)
+                    DetailInfoRow(label: "Created", value: work.createdAt.formatted(date: .abbreviated, time: .shortened))
+                    DetailInfoRow(label: "Updated", value: work.localUpdatedAt?.formatted(date: .abbreviated, time: .shortened))
+                    DetailInfoRow(label: "Favorite", value: work.isFavorite ? "Yes" : "No")
+                    DetailInfoRow(label: "Representative", value: work.isRepresentative ? "Yes" : "No")
+                }
+            }
+
+            DetailSection("Sync") {
+                VStack(spacing: 0) {
+                    DetailInfoRow(label: "Mac", value: work.remoteArtworkId == nil ? "Not synced" : "Synced")
+                    DetailInfoRow(label: "Updated", value: work.localUpdatedAt?.formatted(date: .abbreviated, time: .shortened))
+                    DetailInfoRow(label: "Remote ID", value: work.remoteArtworkId)
+                    DetailInfoRow(label: "Status", value: processingTitle)
                 }
             }
         }
-        .sheet(isPresented: $showingEditor) {
-            ArtworkEditorView(artwork: artwork) { updated in
-                artwork = updated
-                Task { await session.refresh() }
+        .padding(.horizontal, 16)
+    }
+
+    private var combinedTags: [String] {
+        [
+            work.aiTags,
+            work.aiMaterials,
+            work.aiThemes,
+            work.aiColors
+        ]
+        .compactMap { $0 }
+        .flatMap { $0.components(separatedBy: CharacterSet(charactersIn: ",，")) }
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+    }
+
+    private var imageDimensions: String? {
+        guard let path = work.originalPath,
+              let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let image = UIImage(data: data)
+        else {
+            return nil
+        }
+        return "\(Int(image.size.width)) × \(Int(image.size.height))"
+    }
+
+    private var fileName: String? {
+        guard let path = work.originalPath else { return nil }
+        return URL(fileURLWithPath: path).lastPathComponent
+    }
+
+    private var processingCard: some View {
+        HStack(spacing: 12) {
+            Image(systemName: processingIcon)
+                .foregroundStyle(processingColor)
+                .frame(width: 28, height: 28)
+                .background(processingColor.opacity(0.12), in: Circle())
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(processingTitle)
+                    .font(.subheadline.weight(.semibold))
+                if let error = work.processingError, !error.isEmpty {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                } else if session.isMacPaired {
+                    Text("Mac Assist can add titles, descriptions, tags, and search hints.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Connect Volio Desktop to enable local AI processing.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+            if work.processingStatus == "failed" || work.processingStatus == "waiting_for_mac" {
+                Button("Retry") {
+                    session.retryProcessing(work)
+                }
+                .font(.caption.weight(.semibold))
             }
         }
+        .padding(14)
+        .background(VolioTheme.card, in: RoundedRectangle(cornerRadius: 16))
+        .padding(.horizontal, 16)
     }
 
-    private func analyze() async {
-        guard let client = session.client else { return }
-        isAnalyzing = true
-        defer { isAnalyzing = false }
-        do {
-            try await client.analyzeArtwork(id: artwork.id)
-            await session.refresh()
-        } catch {
-            session.errorMessage = error.localizedDescription
+    private var processingIcon: String {
+        switch work.processingStatus {
+        case "succeeded": "checkmark.circle.fill"
+        case "failed": "exclamationmark.triangle.fill"
+        case "waiting_for_mac": "desktopcomputer"
+        case "uploading": "arrow.up.circle.fill"
+        default: "sparkles"
         }
     }
-}
 
-struct DetailBlock: View {
-    var title: String
-    var text: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.caption.weight(.bold))
-                .foregroundStyle(.secondary)
-                .textCase(.uppercase)
-            Text(text)
-                .font(.body)
+    private var processingTitle: String {
+        switch work.processingStatus {
+        case "succeeded": "AI summary ready"
+        case "failed": "Mac Assist needs attention"
+        case "waiting_for_mac": "Waiting for Mac Assist"
+        case "uploading": "Sending to Mac Assist"
+        case "queued": "Queued for Mac Assist"
+        default: "Saved on this iPhone"
         }
     }
-}
 
-struct DetailChip: View {
-    var icon: String
-    var title: String
+    private var processingColor: Color {
+        switch work.processingStatus {
+        case "succeeded": .green
+        case "failed": .orange
+        case "waiting_for_mac": .secondary
+        default: accentColor
+        }
+    }
 
-    var body: some View {
-        Label(title, systemImage: icon)
-            .font(.caption.weight(.semibold))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(.blue.opacity(0.1), in: Capsule())
-            .foregroundStyle(.blue)
+    private func ageLabel(_ months: Int) -> String {
+        let years = max(0, months) / 12
+        let extra = max(0, months) % 12
+        return extra == 0 ? "Age \(years)" : "Age \(years)y \(extra)m"
     }
 }
 
-struct FlowTags: View {
-    var tags: [ArtworkTag]
+private struct DetailSection<Content: View>: View {
+    var title: String
+    let content: Content
+
+    init(_ title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Tags")
+            Text(title)
                 .font(.caption.weight(.bold))
-                .foregroundStyle(.secondary)
+                .tracking(1.1)
+                .foregroundStyle(VolioTheme.mutedInk)
                 .textCase(.uppercase)
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 8)], alignment: .leading, spacing: 8) {
-                ForEach(tags) { tag in
-                    Text(tag.name)
-                        .font(.caption)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(.blue.opacity(0.1), in: Capsule())
-                        .foregroundStyle(.blue)
+
+            content
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14)
+                .background(VolioTheme.card, in: RoundedRectangle(cornerRadius: 16))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color.white.opacity(0.6), lineWidth: 1)
                 }
-            }
         }
     }
 }
+
+private struct DetailInfoRow: View {
+    var label: String
+    var value: String?
+
+    private var displayValue: String {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+            return "Not set"
+        }
+        return value
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Text(label)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(VolioTheme.mutedInk)
+                .frame(width: 116, alignment: .leading)
+            Text(displayValue)
+                .font(.subheadline)
+                .foregroundStyle(displayValue == "Not set" ? VolioTheme.mutedInk.opacity(0.68) : VolioTheme.ink)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .multilineTextAlignment(.leading)
+        }
+        .padding(.vertical, 9)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.black.opacity(0.05))
+                .frame(height: 1)
+        }
+    }
+}
+
+// MARK: - Editor
 
 struct ArtworkEditorView: View {
     @Environment(VolioSession.self) private var session
     @Environment(\.dismiss) private var dismiss
+    @State var work: LocalWork
     @State private var title: String
-    @State private var artworkDate: String
-    @State private var dateNote: String
+    @State private var note: String
     @State private var childQuote: String
-    @State private var parentNote: String
-    @State private var isFavorite: Bool
-    @State private var isRepresentative: Bool
-    @State private var isSaving = false
-    var artwork: Artwork
-    var onSave: (Artwork) -> Void
+    var onSave: (LocalWork) -> Void
 
-    init(artwork: Artwork, onSave: @escaping (Artwork) -> Void) {
-        self.artwork = artwork
+    init(work: LocalWork, onSave: @escaping (LocalWork) -> Void) {
+        self.work = work
         self.onSave = onSave
-        _title = State(initialValue: artwork.title ?? "")
-        _artworkDate = State(initialValue: artwork.artworkDate ?? "")
-        _dateNote = State(initialValue: artwork.dateNote ?? "")
-        _childQuote = State(initialValue: artwork.childQuote ?? "")
-        _parentNote = State(initialValue: artwork.parentNote ?? "")
-        _isFavorite = State(initialValue: artwork.isFavorite?.boolValue ?? false)
-        _isRepresentative = State(initialValue: artwork.isRepresentative?.boolValue ?? false)
+        _title = State(initialValue: work.title ?? "")
+        _note = State(initialValue: work.note ?? "")
+        _childQuote = State(initialValue: work.childQuote ?? "")
     }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Artwork") {
+                Section {
                     TextField("Title", text: $title)
-                    TextField("Created around", text: $artworkDate)
-                    TextField("Date note", text: $dateNote)
+                        .textInputAutocapitalization(.words)
+                } header: {
+                    Label("Artwork", systemImage: "paintbrush")
                 }
-                Section("Story") {
-                    TextField("Child quote", text: $childQuote, axis: .vertical)
-                    TextField("Parent note", text: $parentNote, axis: .vertical)
-                }
-                Section("Flags") {
-                    Toggle("Favorite", isOn: $isFavorite)
-                    Toggle("Representative", isOn: $isRepresentative)
+
+                Section {
+                    TextField("Their words…", text: $childQuote, axis: .vertical)
+                        .lineLimit(2...4)
+                    TextField("Your note…", text: $note, axis: .vertical)
+                        .lineLimit(2...4)
+                } header: {
+                    Label("Story", systemImage: "text.quote")
                 }
             }
-            .navigationTitle("Edit Artwork")
+            .navigationTitle("Edit")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(isSaving ? "Saving" : "Save") {
-                        Task { await save() }
+                    Button("Save") {
+                        session.updateWork(work, title: title, note: note, childQuote: childQuote)
+                        work.title = title.isEmpty ? nil : title
+                        work.note = note.isEmpty ? nil : note
+                        work.childQuote = childQuote.isEmpty ? nil : childQuote
+                        onSave(work)
+                        dismiss()
                     }
-                    .disabled(isSaving)
                 }
             }
-        }
-    }
-
-    private func save() async {
-        guard let client = session.client else { return }
-        isSaving = true
-        defer { isSaving = false }
-        do {
-            let updated = try await client.updateArtwork(id: artwork.id, patch: [
-                "title": .string(title),
-                "artwork_date": .string(artworkDate),
-                "date_note": .string(dateNote),
-                "child_quote": .string(childQuote),
-                "parent_note": .string(parentNote),
-                "is_favorite": .bool(isFavorite),
-                "is_representative": .bool(isRepresentative),
-            ])
-            onSave(updated)
-            dismiss()
-        } catch {
-            session.errorMessage = error.localizedDescription
         }
     }
 }

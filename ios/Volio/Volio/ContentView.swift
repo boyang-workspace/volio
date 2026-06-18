@@ -1,55 +1,77 @@
 import SwiftUI
+import SwiftData
+import PhotosUI
+import UIKit
 
 struct ContentView: View {
     @Environment(VolioSession.self) private var session
+    @Environment(\.modelContext) private var modelContext
 
     var body: some View {
-        Group {
-            if session.isPaired {
-                if session.children.isEmpty && session.isLoading {
-                    ProgressView("Loading Volio Desktop...")
-                } else if session.children.isEmpty {
-                    OnboardingChildView()
-                } else {
-                    RootTabsView()
-                }
-            } else {
-                PairingView()
+        RootTabsView()
+            .onAppear {
+                session.setup(context: modelContext)
             }
-        }
-        .task {
-            if session.isPaired {
-                await session.refresh()
-            }
-        }
-        .onOpenURL { url in
-            session.pair(with: url)
-            Task { await session.refresh() }
-        }
     }
 }
 
 struct RootTabsView: View {
     @Environment(VolioSession.self) private var session
+    @State private var selectedTab: MainTab = .gallery
+    @State private var showCamera = false
+    @State private var showPhotoPicker = false
+    @State private var photoPickerItems: [PhotosPickerItem] = []
 
     var body: some View {
-        TabView {
-            TimelineView()
-                .tabItem {
-                    Label("Timeline", systemImage: "clock")
-                }
+        ZStack(alignment: .bottomTrailing) {
+            TabView(selection: $selectedTab) {
+                GalleryView()
+                    .tag(MainTab.gallery)
 
-            CaptureView()
-                .tabItem {
-                    Label("Capture", systemImage: "camera.fill")
-                }
+                TimelineView()
+                    .tag(MainTab.timeline)
 
-            LibraryView()
-                .tabItem {
-                    Label("Library", systemImage: "rectangle.grid.2x2")
+                SearchView()
+                    .tag(MainTab.search)
+            }
+            .tint(VolioTheme.accent)
+            .toolbar(.hidden, for: .tabBar)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if !session.isShowingDetail {
+                HStack(alignment: .center, spacing: 16) {
+                    NativeTabCluster(selectedTab: $selectedTab)
+                        .frame(width: 250, height: 68)
+                    Spacer(minLength: 16)
+                    FloatingCaptureButton {
+                        showCamera = true
+                    }
                 }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 12)
+                .transition(.scale(scale: 0.9).combined(with: .opacity))
+                .zIndex(20)
+            }
         }
-        .ignoresSafeArea(.keyboard, edges: .bottom)
+        .tint(VolioTheme.accent)
+        .fullScreenCover(isPresented: $showCamera) {
+            StackCameraView(
+                onCapture: { data in
+                    session.createWork(data: data, workType: "visual", createdAround: .capturedDate)
+                },
+                onImportPhotos: {
+                    showCamera = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        showPhotoPicker = true
+                    }
+                }
+            )
+            .ignoresSafeArea()
+        }
+        .photosPicker(isPresented: $showPhotoPicker, selection: $photoPickerItems, maxSelectionCount: 30, matching: .images)
+        .onChange(of: photoPickerItems) { _, items in
+            Task { await importPhotos(items) }
+        }
         .overlay(alignment: .top) {
             if let message = session.errorMessage {
                 Text(message)
@@ -57,112 +79,301 @@ struct RootTabsView: View {
                     .foregroundStyle(.white)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 9)
-                    .background(.red, in: Capsule())
+                    .background(VolioTheme.accent, in: Capsule())
                     .padding(.top, 8)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .allowsHitTesting(false)
+                    .task(id: message) {
+                        try? await Task.sleep(nanoseconds: 3_000_000_000)
+                        if session.errorMessage == message {
+                            session.errorMessage = nil
+                        }
+                    }
             }
+        }
+        .animation(.spring(duration: 0.3), value: session.errorMessage != nil)
+    }
+
+    @MainActor
+    private func importPhotos(_ items: [PhotosPickerItem]) async {
+        guard !items.isEmpty else { return }
+        var loadedJPEGs: [Data] = []
+        for item in items {
+            if let data = try? await item.loadTransferable(type: Data.self),
+               let image = UIImage(data: data),
+               let jpeg = image.jpegData(compressionQuality: 0.86) {
+                loadedJPEGs.append(jpeg)
+            }
+        }
+        for jpeg in loadedJPEGs {
+            session.createWork(data: jpeg, workType: "visual", createdAround: .capturedDate)
+        }
+        photoPickerItems.removeAll()
+    }
+}
+
+enum MainTab: String, CaseIterable, Identifiable {
+    case gallery
+    case timeline
+    case search
+    case capture
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .gallery: "Gallery"
+        case .timeline: "Timeline"
+        case .search: "Search"
+        case .capture: "Capture"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .gallery: "square.grid.2x2"
+        case .timeline: "clock"
+        case .search: "magnifyingglass"
+        case .capture: "camera.fill"
         }
     }
 }
 
-struct OnboardingChildView: View {
+private struct NativeTabCluster: UIViewRepresentable {
+    @Binding var selectedTab: MainTab
+    private static let tabs: [MainTab] = [.gallery, .timeline, .search]
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(selectedTab: $selectedTab)
+    }
+
+    func makeUIView(context: Context) -> UITabBar {
+        let tabBar = UITabBar()
+        tabBar.delegate = context.coordinator
+        tabBar.items = Self.tabs.enumerated().map { index, tab in
+            UITabBarItem(title: tab.title, image: UIImage(systemName: tab.icon), tag: index)
+        }
+        tabBar.itemPositioning = .fill
+        tabBar.tintColor = UIColor(red: 0.94, green: 0.33, blue: 0.20, alpha: 1)
+        tabBar.unselectedItemTintColor = .secondaryLabel
+        tabBar.clipsToBounds = true
+        tabBar.layer.cornerRadius = 24
+        tabBar.layer.cornerCurve = .continuous
+
+        let appearance = UITabBarAppearance()
+        appearance.configureWithDefaultBackground()
+        appearance.stackedLayoutAppearance.selected.iconColor = tabBar.tintColor
+        appearance.stackedLayoutAppearance.selected.titleTextAttributes = [.foregroundColor: tabBar.tintColor as Any]
+        appearance.stackedLayoutAppearance.normal.iconColor = .secondaryLabel
+        appearance.stackedLayoutAppearance.normal.titleTextAttributes = [.foregroundColor: UIColor.secondaryLabel]
+        tabBar.standardAppearance = appearance
+        tabBar.scrollEdgeAppearance = appearance
+        updateSelection(tabBar)
+        return tabBar
+    }
+
+    func updateUIView(_ uiView: UITabBar, context: Context) {
+        updateSelection(uiView)
+    }
+
+    private func updateSelection(_ tabBar: UITabBar) {
+        guard let index = Self.tabs.firstIndex(of: selectedTab),
+              let item = tabBar.items?.first(where: { $0.tag == index }) else { return }
+        if tabBar.selectedItem !== item {
+            tabBar.selectedItem = item
+        }
+    }
+
+    final class Coordinator: NSObject, UITabBarDelegate {
+        var selectedTab: Binding<MainTab>
+
+        init(selectedTab: Binding<MainTab>) {
+            self.selectedTab = selectedTab
+        }
+
+        func tabBar(_ tabBar: UITabBar, didSelect item: UITabBarItem) {
+            guard item.tag >= 0, item.tag < NativeTabCluster.tabs.count else { return }
+            selectedTab.wrappedValue = NativeTabCluster.tabs[item.tag]
+        }
+    }
+}
+
+private struct FloatingCaptureButton: View {
+    var onCapture: () -> Void
+
+    var body: some View {
+        Button(action: onCapture) {
+            Image(systemName: MainTab.capture.icon)
+                .font(.system(size: 25, weight: .bold))
+                .frame(width: 68, height: 68)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Capture")
+        .modifier(CaptureButtonChrome())
+    }
+}
+
+private struct CaptureButtonChrome: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content
+                .foregroundStyle(VolioTheme.accent)
+                .glassEffect(.regular.tint(Color.white.opacity(0.46)).interactive(), in: .circle)
+                .shadow(color: VolioTheme.ink.opacity(0.16), radius: 16, y: 8)
+        } else {
+            content
+                .foregroundStyle(.white)
+                .background(VolioTheme.accent, in: Circle())
+                .shadow(color: VolioTheme.accent.opacity(0.28), radius: 16, y: 8)
+        }
+    }
+}
+
+extension View {
+    @ViewBuilder
+    func volioGlass(cornerRadius: CGFloat, tint: Color = VolioTheme.glassTint, interactive: Bool = false) -> some View {
+        if #available(iOS 26.0, *) {
+            if interactive {
+                self.glassEffect(.regular.tint(tint).interactive(), in: .rect(cornerRadius: cornerRadius))
+            } else {
+                self.glassEffect(.regular.tint(tint), in: .rect(cornerRadius: cornerRadius))
+            }
+        } else {
+            self
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius))
+                .overlay {
+                    RoundedRectangle(cornerRadius: cornerRadius)
+                        .stroke(Color.white.opacity(0.52), lineWidth: 1)
+                }
+        }
+    }
+}
+
+// MARK: - Settings Tab
+
+struct SettingsLinkView: View {
+    var body: some View {
+        NavigationStack {
+            SettingsContent()
+        }
+    }
+}
+
+struct SettingsContent: View {
     @Environment(VolioSession.self) private var session
+    @Environment(\.modelContext) private var modelContext
+    @State private var showPairing = false
     @State private var name = ""
     @State private var birthYear = Calendar.current.component(.year, from: Date()) - 6
     @State private var birthMonth = 6
-    @State private var onlyYear = false
-    @State private var isSaving = false
+    @State private var hasProfile = false
 
-    private var birthDateValue: String {
-        onlyYear ? String(birthYear) : String(format: "%04d-%02d", birthYear, birthMonth)
-    }
+    private let accentColor = VolioTheme.accent
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Image(systemName: "sparkles.rectangle.stack")
-                            .font(.system(size: 48, weight: .semibold))
-                            .foregroundStyle(.blue)
-                        Text("Start with one child")
-                            .font(.largeTitle.bold())
-                        Text("Volio uses birth month to place old artwork into the right age on the timeline.")
-                            .font(.body)
+        List {
+            Section {
+                Toggle("Profile", isOn: $hasProfile)
+                    .tint(accentColor)
+                if hasProfile {
+                    TextField("Name", text: $name)
+                        .textInputAutocapitalization(.words)
+                    Picker("Birth year", selection: $birthYear) {
+                        ForEach((2005...Calendar.current.component(.year, from: Date())).reversed(), id: \.self) { year in
+                            Text(String(year)).tag(year)
+                        }
+                    }
+                    Picker("Birth month", selection: $birthMonth) {
+                        ForEach(1...12, id: \.self) { month in
+                            Text(Calendar.current.monthSymbols[month - 1]).tag(month)
+                        }
+                    }
+                }
+            } header: {
+                Label("Creator", systemImage: "person.fill")
+            }
+
+            Section {
+                if session.isMacPaired {
+                    HStack {
+                        Label("Paired", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        Spacer()
+                        Text(session.macHostName)
+                            .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
-
-                    VStack(alignment: .leading, spacing: 14) {
-                        TextField("Nickname", text: $name)
-                            .textInputAutocapitalization(.words)
-                            .padding(14)
-                            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
-
-                        Toggle("I only know the birth year", isOn: $onlyYear)
-
-                        Picker("Birth year", selection: $birthYear) {
-                            ForEach((2005...Calendar.current.component(.year, from: Date())).reversed(), id: \.self) { year in
-                                Text(String(year)).tag(year)
-                            }
-                        }
-                        .pickerStyle(.wheel)
-                        .frame(height: 118)
-
-                        if !onlyYear {
-                            Picker("Birth month", selection: $birthMonth) {
-                                ForEach(1...12, id: \.self) { month in
-                                    Text(Calendar.current.monthSymbols[month - 1]).tag(month)
-                                }
-                            }
-                            .pickerStyle(.wheel)
-                            .frame(height: 118)
-                        }
+                    Button("Forget Mac", role: .destructive) {
+                        session.forgetMac()
                     }
-                    .padding(16)
-                    .background(.background, in: RoundedRectangle(cornerRadius: 22))
-                    .shadow(color: .black.opacity(0.06), radius: 18, y: 8)
-
-                    Button {
-                        Task { await save() }
-                    } label: {
-                        Label(isSaving ? "Creating..." : "Create Timeline", systemImage: "arrow.right.circle.fill")
-                            .frame(maxWidth: .infinity)
+                } else {
+                    Button("Connect to Mac") {
+                        showPairing = true
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSaving)
+                    Text("Pair with Volio Desktop on your Mac for AI analysis and backup.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
                 }
-                .padding(22)
+            } header: {
+                Label("Mac Assist", systemImage: "desktopcomputer")
             }
-            .background(Color(.systemGroupedBackground))
-            .navigationTitle("Volio")
-            .toolbar {
-                Button("Forget Mac") {
-                    session.forgetPairing()
-                }
+
+            Section {
+                Text("\(session.works.count) works")
+                    .foregroundStyle(.secondary)
+                Text("Volio stores everything on this iPhone.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            } header: {
+                Label("Storage", systemImage: "internaldrive")
             }
-            .scrollDismissesKeyboard(.interactively)
+        }
+        .navigationTitle("Settings")
+        .fullScreenCover(isPresented: $showPairing) {
+            PairingView()
+        }
+        .onAppear { loadProfile() }
+        .onChange(of: hasProfile) { _, newValue in
+            if !newValue { clearProfile() }
+            else { saveProfile() }
+        }
+        .onChange(of: name) { _, _ in saveProfile() }
+        .onChange(of: birthYear) { _, _ in saveProfile() }
+        .onChange(of: birthMonth) { _, _ in saveProfile() }
+    }
+
+    private func loadProfile() {
+        let descriptor = FetchDescriptor<LocalProfile>()
+        if let existing = try? modelContext.fetch(descriptor).first {
+            hasProfile = true
+            name = existing.name ?? ""
+            birthYear = existing.birthYear ?? Calendar.current.component(.year, from: Date()) - 6
+            birthMonth = existing.birthMonth ?? 6
+            session.profile = existing
         }
     }
 
-    private func save() async {
-        guard let client = session.client else { return }
-        isSaving = true
-        defer { isSaving = false }
-        do {
-            let child = try await client.addChild(
-                name: name.trimmingCharacters(in: .whitespacesAndNewlines),
-                birthDate: birthDateValue
-            )
-            session.children = [child]
-            session.selectedChildId = child.id
-            await session.refresh()
-        } catch {
-            session.errorMessage = error.localizedDescription
+    private func saveProfile() {
+        guard hasProfile else { return }
+        let descriptor = FetchDescriptor<LocalProfile>()
+        let existing = try? modelContext.fetch(descriptor).first
+        let profile = existing ?? LocalProfile()
+        profile.name = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : name
+        profile.birthYear = birthYear
+        profile.birthMonth = birthMonth
+        if existing == nil {
+            modelContext.insert(profile)
+        }
+        session.profile = profile
+        try? modelContext.save()
+    }
+
+    private func clearProfile() {
+        let descriptor = FetchDescriptor<LocalProfile>()
+        if let existing = try? modelContext.fetch(descriptor).first {
+            existing.name = nil
+            existing.birthYear = nil
+            existing.birthMonth = nil
+            try? modelContext.save()
         }
     }
-}
-
-#Preview {
-    ContentView()
-        .environment(VolioSession())
 }

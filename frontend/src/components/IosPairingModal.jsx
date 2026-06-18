@@ -1,12 +1,13 @@
 import { useState, useEffect } from 'react'
 import { useVolio } from '../VolioContext'
-import { createIosPairingSession } from '../api'
+import { checkIosPairingSession, createIosPairingSession } from '../api'
 
 export default function IosPairingModal() {
   const { iosPairingOpen, setIosPairingOpen, setIosPairingSession, toast, t } = useVolio()
   const [pairing, setPairing] = useState(null)
   const [loading, setLoading] = useState(false)
   const [failed, setFailed] = useState(false)
+  const [paired, setPaired] = useState(false)
 
   useEffect(() => {
     if (!iosPairingOpen) return
@@ -16,6 +17,7 @@ export default function IosPairingModal() {
         if (cancelled) return null
         setPairing(null)
         setFailed(false)
+        setPaired(false)
         setLoading(true)
         return createIosPairingSession()
       })
@@ -23,12 +25,6 @@ export default function IosPairingModal() {
         if (cancelled) return
         if (!data) return
         setPairing(data)
-        setIosPairingSession({
-          token: data.token,
-          baseUrl: data.base_url,
-          hostName: data.host_name,
-          expiresAt: Date.now() + (data.expires_in || 28800) * 1000,
-        })
         setLoading(false)
       })
       .catch(() => {
@@ -40,15 +36,54 @@ export default function IosPairingModal() {
     return () => { cancelled = true }
   }, [iosPairingOpen, setIosPairingSession, toast, t])
 
+  useEffect(() => {
+    if (!iosPairingOpen || !pairing?.token || paired) return
+    let cancelled = false
+    let closeTimer = null
+    const poll = async () => {
+      try {
+        const result = await checkIosPairingSession(pairing.token)
+        if (cancelled) return
+        if (result?.valid && result?.last_seen_at) {
+          setPaired(true)
+          setIosPairingSession(current => ({
+            ...(current || {}),
+            token: pairing.token,
+            baseUrl: pairing.base_url,
+            hostName: pairing.host_name,
+            expiresAt: Date.now() + (result.expires_in || pairing.expires_in || 28800) * 1000,
+            lastSeenAt: result.last_seen_at,
+          }))
+          toast('iPhone connected')
+          closeTimer = setTimeout(() => setIosPairingOpen(false), 1100)
+        }
+      } catch { /* keep waiting */ }
+    }
+    poll()
+    const timer = setInterval(poll, 1200)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+      clearTimeout(closeTimer)
+    }
+  }, [iosPairingOpen, pairing, paired, setIosPairingOpen, setIosPairingSession, toast])
+
   if (!iosPairingOpen) return null
 
   const copyPayload = async () => {
     if (!pairing) return
+    const payload = JSON.stringify({
+      type: 'volio-ios-pairing',
+      version: 1,
+      base_url: pairing.base_url,
+      token: pairing.token,
+      host_name: pairing.host_name,
+    })
     try {
-      await navigator.clipboard.writeText(pairing.pairing_url)
+      await navigator.clipboard.writeText(payload)
       toast(t('copyPairingPayload'))
     } catch {
-      toast(pairing.base_url)
+      toast(pairing.pairing_url)
     }
   }
 
@@ -80,9 +115,22 @@ export default function IosPairingModal() {
           {failed && (
             <div className="py-5 text-xs text-[#a1a1a6]">{t('failedToGenerate')}</div>
           )}
-          {pairing?.qr_data_url && (
+          {pairing?.qr_data_url && !paired && (
             <div className="rounded-2xl border border-[#e5e5e5] bg-white p-3 shadow-sm">
               <img src={pairing.qr_data_url} alt="Volio iPhone pairing QR code" className="size-44 image-rendering-pixelated" />
+            </div>
+          )}
+          {paired && (
+            <div className="grid size-44 place-items-center rounded-2xl border border-[#cdeed7] bg-[#ecf8f0] text-[#248a3d] shadow-sm">
+              <div className="text-center">
+                <div className="mx-auto mb-3 grid size-14 place-items-center rounded-full bg-white">
+                  <svg width="30" height="30" viewBox="0 0 24 24" fill="none">
+                    <path d="m5 12 4 4L19 6" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </div>
+                <div className="text-sm font-bold">iPhone connected</div>
+                <div className="mt-1 text-xs font-medium text-[#5f8f67]">Volio is ready</div>
+              </div>
             </div>
           )}
           {pairing && (

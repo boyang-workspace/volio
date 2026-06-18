@@ -46,6 +46,7 @@ THUMBNAILS_DIR = LIBRARY_DIR / "thumbnails"
 EXPORTS_DIR = ROOT / "exports"
 STATIC_DIR = ROOT / "static"
 FRONTEND_DIST = ROOT / "frontend" / "dist"
+PROCESSOR_JOBS_DIR = DATA_DIR / "processor_jobs"
 
 OLLAMA_URL = os.getenv("VOLIO_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
 OLLAMA_MODEL = os.getenv("VOLIO_OLLAMA_MODEL", "minicpm-v4.5:8b")
@@ -61,10 +62,12 @@ _last_request_at: float = time.time()
 _ai_queue_paused = threading.Event()
 _ai_worker_lock = threading.Lock()
 _ai_worker_active = False
+_processor_worker_lock = threading.Lock()
+_processor_worker_active = False
 _mobile_sessions: dict[str, dict[str, Any]] = {}
 _ios_pairing_sessions: dict[str, dict[str, Any]] = {}
 MOBILE_TOKEN_TTL = 3600
-IOS_PAIRING_TOKEN_TTL = 8 * 3600
+IOS_PAIRING_TOKEN_TTL = 30 * 24 * 3600
 SUPPORTED_LOCALES = {"en", "zh"}
 DEFAULT_SETTINGS = {
     "ui_language": VOLIO_DEFAULT_LOCALE if VOLIO_DEFAULT_LOCALE in SUPPORTED_LOCALES else "en",
@@ -124,6 +127,7 @@ def ensure_dirs() -> None:
         ORIGINALS_DIR,
         PROCESSED_DIR,
         THUMBNAILS_DIR,
+        PROCESSOR_JOBS_DIR,
         EXPORTS_DIR / "pdf",
         EXPORTS_DIR / "json",
         EXPORTS_DIR / "zip",
@@ -200,6 +204,17 @@ def init_db() -> None:
               FOREIGN KEY (person_id) REFERENCES children(id)
             );
 
+            CREATE TABLE IF NOT EXISTS ios_pairing_tokens (
+              token TEXT PRIMARY KEY,
+              host TEXT NOT NULL,
+              host_name TEXT NOT NULL,
+              port INTEGER NOT NULL,
+              base_url TEXT NOT NULL,
+              created_at REAL NOT NULL,
+              last_seen_at TEXT,
+              ttl INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS artworks (
               id TEXT PRIMARY KEY,
               child_id TEXT NOT NULL,
@@ -229,6 +244,7 @@ def init_db() -> None:
               physical_status TEXT DEFAULT 'undecided',
               is_favorite INTEGER DEFAULT 0,
               is_representative INTEGER DEFAULT 0,
+              client_work_id TEXT,
               ai_status TEXT DEFAULT 'pending',
               ai_model TEXT,
               ai_locale TEXT,
@@ -297,6 +313,28 @@ def init_db() -> None:
               key TEXT PRIMARY KEY,
               value TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS processor_jobs (
+              id TEXT PRIMARY KEY,
+              token_hint TEXT,
+              source TEXT DEFAULT 'ios',
+              work_id TEXT NOT NULL,
+              work_type TEXT DEFAULT 'paper',
+              title TEXT,
+              created_around_kind TEXT,
+              created_around_label TEXT,
+              created_around_year INTEGER,
+              created_around_month INTEGER,
+              created_around_season TEXT,
+              created_around_age_months INTEGER,
+              file_path TEXT NOT NULL,
+              status TEXT NOT NULL,
+              result_json TEXT,
+              error_message TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              completed_at TEXT
+            );
             """
         )
         ensure_column(con, "artworks", "project_id", "TEXT")
@@ -313,6 +351,16 @@ def init_db() -> None:
         ensure_column(con, "artworks", "deleted_at", "TEXT")
         ensure_column(con, "artworks", "date_precision", "TEXT")
         ensure_column(con, "artworks", "child_age_months", "INTEGER")
+        ensure_column(con, "artworks", "client_work_id", "TEXT")
+        con.execute(
+            """
+            UPDATE artworks
+            SET client_work_id = replace(replace(original_filename, '.jpg', ''), '.jpeg', '')
+            WHERE (client_work_id IS NULL OR trim(client_work_id) = '')
+              AND lower(original_filename) GLOB '[0-9a-f]*.jp*g'
+              AND length(replace(replace(original_filename, '.jpg', ''), '.jpeg', '')) >= 32
+            """
+        )
         ensure_column(con, "batches", "work_type", "TEXT DEFAULT 'paper'")
         ensure_column(con, "batches", "date_precision", "TEXT")
         ensure_column(con, "batches", "child_age_months", "INTEGER")
@@ -328,6 +376,16 @@ def init_db() -> None:
         con.execute("UPDATE artworks SET work_type = 'artwork' WHERE work_type IS NULL")
         con.execute("UPDATE artworks SET visibility = 'private' WHERE visibility IS NULL")
         con.execute("UPDATE artworks SET ownership_status = 'parent_managed' WHERE ownership_status IS NULL")
+        con.execute(
+            """
+            UPDATE artworks
+            SET processed_path = NULL,
+                processed_status = 'original',
+                processed_error = NULL
+            WHERE processed_path IS NOT NULL
+            """
+        )
+        con.execute("DELETE FROM work_files WHERE file_role = 'processed'")
         if pref(con, "ui_language") == "zh" and pref(con, "ui_language_default_en_migrated") != "true":
             set_pref(con, "ui_language", "en")
             set_pref(con, "ui_language_default_en_migrated", "true")
@@ -338,6 +396,16 @@ def init_db() -> None:
                 ai_error = 'Analysis was interrupted. Run AI again.',
                 updated_at = ?
             WHERE ai_status = 'processing'
+            """,
+            (now_iso(),),
+        )
+        con.execute(
+            """
+            UPDATE processor_jobs
+            SET status = 'failed',
+                error_message = 'Processing was interrupted. Retry from Volio.',
+                updated_at = ?
+            WHERE status = 'processing'
             """,
             (now_iso(),),
         )
@@ -762,10 +830,6 @@ def processed_path_for(original_rel: str) -> Path:
 
 
 def artwork_source_path(row: sqlite3.Row, source: str = "display") -> Path:
-    if source == "original":
-        return ROOT / row["original_path"]
-    if row["processed_path"]:
-        return ROOT / row["processed_path"]
     return ROOT / row["original_path"]
 
 
@@ -874,7 +938,7 @@ def make_thumbnail(artwork_id: str) -> None:
         row = con.execute("SELECT original_path, processed_path FROM artworks WHERE id = ?", (artwork_id,)).fetchone()
         if not row:
             return
-        source_rel = row["processed_path"] or row["original_path"]
+        source_rel = row["original_path"]
         source = ROOT / source_rel
         source_path = Path(source_rel)
         year = source_path.parent.name
@@ -1173,13 +1237,13 @@ def hydrate_artwork(con: sqlite3.Connection, row: sqlite3.Row, base_url: str | N
     item["thumbnail_url"] = f"/media/{item['thumbnail_path']}" if item.get("thumbnail_path") else None
     item["original_url"] = f"/media/{item['original_path']}"
     item["processed_url"] = f"/media/{item['processed_path']}" if item.get("processed_path") else None
-    item["display_url"] = item["processed_url"] or item["original_url"]
+    item["display_url"] = item["original_url"]
     if base_url:
         base = base_url.rstrip("/")
         item["thumbnail_absolute_url"] = f"{base}{item['thumbnail_url']}" if item.get("thumbnail_url") else None
         item["original_absolute_url"] = f"{base}{item['original_url']}"
         item["processed_absolute_url"] = f"{base}{item['processed_url']}" if item.get("processed_url") else None
-        item["display_absolute_url"] = item["processed_absolute_url"] or item["original_absolute_url"]
+        item["display_absolute_url"] = item["original_absolute_url"]
     return item
 
 
@@ -1238,7 +1302,7 @@ def analyze_artwork(artwork_id: str) -> None:
             ("processing", now_iso(), artwork_id),
         )
         con.commit()
-        analysis_path = ROOT / (row["processed_path"] or row["original_path"])
+        analysis_path = ROOT / row["original_path"]
 
     try:
         image_bytes = analysis_image_bytes(analysis_path)
@@ -1313,6 +1377,146 @@ def analyze_artwork(artwork_id: str) -> None:
             con.commit()
 
 
+def processor_result_from_image(path: Path, filename: str | None, work_type: str | None = None) -> dict[str, Any]:
+    settings_language = VOLIO_AI_LOCALE if VOLIO_AI_LOCALE in SUPPORTED_LOCALES else "en"
+    image_bytes = analysis_image_bytes(path)
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": ai_prompt(settings_language),
+                "images": [base64.b64encode(image_bytes).decode("ascii")],
+            }
+        ],
+        "stream": False,
+        "options": {"temperature": 0.1},
+    }
+    response = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=180)
+    response.raise_for_status()
+    body = response.json()
+    raw_text = body.get("message", {}).get("content", "").strip() or body.get("response", "").strip()
+    parsed = parse_ai_chat_text(raw_text, filename)
+    short_description = clean_ai_text(parsed.get("short_description"))
+    long_description = clean_ai_text(parsed.get("long_description")) or short_description
+    fallback_title = title_from_description(short_description) or filename_title(filename)
+    return {
+        "title": clean_ai_text(parsed.get("title")) or fallback_title,
+        "description": short_description,
+        "long_description": long_description,
+        "work_type": work_type or "paper",
+        "materials": clean_ai_list(parsed.get("materials_guess", [])),
+        "themes": clean_ai_list(parsed.get("themes", [])),
+        "objects": clean_ai_list(parsed.get("objects", [])),
+        "colors": clean_ai_list(parsed.get("colors", [])),
+        "techniques": clean_ai_list(parsed.get("techniques_guess", [])),
+        "tags": clean_ai_list(parsed.get("suggested_tags", [])),
+        "raw": {"raw_text": raw_text, "parsed": parsed},
+    }
+
+
+def processor_job_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    data = dict(row)
+    result = None
+    if data.get("result_json"):
+        try:
+            result = json.loads(data["result_json"])
+        except Exception:
+            result = None
+    return {
+        "id": data["id"],
+        "work_id": data.get("work_id"),
+        "status": data.get("status"),
+        "error_message": data.get("error_message"),
+        "result": result,
+        "created_at": data.get("created_at"),
+        "updated_at": data.get("updated_at"),
+        "completed_at": data.get("completed_at"),
+    }
+
+
+def next_processor_job_id() -> str | None:
+    with connect() as con:
+        row = con.execute(
+            """
+            SELECT id
+            FROM processor_jobs
+            WHERE status IN ('queued', 'failed_retry')
+            ORDER BY created_at ASC
+            LIMIT 1
+            """
+        ).fetchone()
+        return row["id"] if row else None
+
+
+def process_processor_job(job_id: str) -> None:
+    with connect() as con:
+        row = con.execute("SELECT * FROM processor_jobs WHERE id = ?", (job_id,)).fetchone()
+        if not row:
+            return
+        con.execute(
+            "UPDATE processor_jobs SET status = 'processing', error_message = NULL, updated_at = ? WHERE id = ?",
+            (now_iso(), job_id),
+        )
+        con.commit()
+        file_path = ROOT / row["file_path"]
+        filename = file_path.name
+        work_type = row["work_type"] or "paper"
+    try:
+        result = processor_result_from_image(file_path, filename, work_type)
+        with connect() as con:
+            con.execute(
+                """
+                UPDATE processor_jobs
+                SET status = 'succeeded',
+                    result_json = ?,
+                    error_message = NULL,
+                    updated_at = ?,
+                    completed_at = ?
+                WHERE id = ?
+                """,
+                (json.dumps(result, ensure_ascii=False), now_iso(), now_iso(), job_id),
+            )
+            con.commit()
+    except Exception as exc:
+        with connect() as con:
+            con.execute(
+                """
+                UPDATE processor_jobs
+                SET status = 'failed',
+                    error_message = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (str(exc)[:500], now_iso(), job_id),
+            )
+            con.commit()
+
+
+def processor_queue_worker() -> None:
+    global _processor_worker_active
+    try:
+        while True:
+            job_id = next_processor_job_id()
+            if not job_id:
+                break
+            process_processor_job(job_id)
+    finally:
+        with _processor_worker_lock:
+            _processor_worker_active = False
+
+
+def start_processor_worker() -> bool:
+    global _processor_worker_active
+    with _processor_worker_lock:
+        if _processor_worker_active:
+            return True
+        _processor_worker_active = True
+        thread = threading.Thread(target=processor_queue_worker, name="volio-processor-queue", daemon=True)
+        thread.start()
+        return True
+
+
 def next_unprocessed_artwork_id() -> str | None:
     with connect() as con:
         row = con.execute(
@@ -1365,6 +1569,7 @@ def save_upload(
     date_precision: str | None = None,
     child_age_months: int | None = None,
     work_type: str = "paper",
+    client_work_id: str | None = None,
 ) -> dict[str, Any]:
     original_name = file.filename or "artwork.jpg"
     ext = Path(original_name).suffix.lower()
@@ -1381,6 +1586,38 @@ def save_upload(
         child_age_months = age_months_from_dates(child_birth_date, artwork_date, date_precision)
     clean_precision = normalized_precision(date_precision, artwork_date, child_age_months)
     clean_work_type = work_type if work_type in {"paper", "object", "artwork"} else "paper"
+    clean_client_work_id = (client_work_id or "").strip()[:120] or None
+
+    if clean_client_work_id:
+        existing = con.execute("SELECT * FROM artworks WHERE client_work_id = ?", (clean_client_work_id,)).fetchone()
+        if existing:
+            ts = now_iso()
+            con.execute(
+                """
+                UPDATE artworks
+                SET child_id = ?,
+                    batch_id = COALESCE(batch_id, ?),
+                    work_type = ?,
+                    artwork_date = COALESCE(?, artwork_date),
+                    date_precision = ?,
+                    date_note = COALESCE(?, date_note),
+                    child_age_months = COALESCE(?, child_age_months),
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    child_id,
+                    batch_id,
+                    clean_work_type,
+                    artwork_date or None,
+                    clean_precision,
+                    date_note or None,
+                    child_age_months,
+                    ts,
+                    existing["id"],
+                ),
+            )
+            return {"id": existing["id"], "original_filename": existing["original_filename"], "client_work_id": clean_client_work_id, "reused": True}
 
     artwork_id = str(uuid.uuid4())
     year = image_year(artwork_date)
@@ -1404,9 +1641,9 @@ def save_upload(
         """
         INSERT INTO artworks (
           id, child_id, batch_id, work_type, ownership_status, visibility, title, artwork_date, date_precision, date_note, child_age_months, original_path,
-          thumbnail_path, original_filename, width, height, ai_status, created_at, updated_at
+          thumbnail_path, original_filename, width, height, client_work_id, ai_status, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             artwork_id,
@@ -1425,6 +1662,7 @@ def save_upload(
             original_name,
             width,
             height,
+            clean_client_work_id,
             "pending",
             ts,
             ts,
@@ -1449,7 +1687,7 @@ def save_upload(
             ts,
         ),
     )
-    return {"id": artwork_id, "original_filename": original_name}
+    return {"id": artwork_id, "original_filename": original_name, "client_work_id": clean_client_work_id, "reused": False}
 
 
 def artwork_query(
@@ -1747,7 +1985,17 @@ def state() -> dict[str, Any]:
         }
         latest = artwork_query(con)[:8]
         revision_row = con.execute("SELECT MAX(updated_at) AS revision FROM artworks").fetchone()
-    return {"counts": counts, "latest": latest, "revision": revision_row["revision"] if revision_row else None}
+        processor_rows = con.execute(
+            "SELECT status, COUNT(*) AS n FROM processor_jobs GROUP BY status"
+        ).fetchall()
+    processor = {row["status"]: row["n"] for row in processor_rows}
+    processor["worker_active"] = _processor_worker_active
+    return {
+        "counts": counts,
+        "latest": latest,
+        "revision": revision_row["revision"] if revision_row else None,
+        "processor": processor,
+    }
 
 
 @app.get("/api/children")
@@ -2231,7 +2479,11 @@ async def update_artwork(artwork_id: str, payload: dict[str, Any]) -> dict[str, 
         "child_quote",
         "parent_note",
         "artwork_date",
+        "date_precision",
         "date_note",
+        "child_age_months",
+        "work_type",
+        "medium",
         "physical_status",
         "is_favorite",
         "is_representative",
@@ -2392,20 +2644,69 @@ def _purge_expired_ios_tokens() -> None:
     ]
     for token in expired:
         _ios_pairing_sessions.pop(token, None)
+    with connect() as con:
+        con.execute(
+            "DELETE FROM ios_pairing_tokens WHERE ? - created_at > ttl",
+            (now,),
+        )
+        con.commit()
 
 
-def _require_ios_pairing(request: Request, form_token: str | None = None) -> dict[str, Any]:
+def _persist_ios_pairing_token(token: str, session: dict[str, Any]) -> None:
+    with connect() as con:
+        con.execute(
+            """
+            INSERT OR REPLACE INTO ios_pairing_tokens
+              (token, host, host_name, port, base_url, created_at, last_seen_at, ttl)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                token,
+                session["host"],
+                session["host_name"],
+                int(session["port"]),
+                session["base_url"],
+                float(session["created_at"]),
+                session.get("last_seen_at"),
+                int(session.get("ttl", IOS_PAIRING_TOKEN_TTL)),
+            ),
+        )
+        con.commit()
+
+
+def _load_ios_pairing_token(token: str) -> dict[str, Any] | None:
+    with connect() as con:
+        row = con.execute("SELECT * FROM ios_pairing_tokens WHERE token = ?", (token,)).fetchone()
+    if not row:
+        return None
+    session = dict(row)
+    session["created_at"] = float(session["created_at"])
+    session["ttl"] = int(session.get("ttl") or IOS_PAIRING_TOKEN_TTL)
+    session["port"] = int(session.get("port") or server_port())
+    return session
+
+
+def _require_ios_pairing(request: Request, form_token: str | None = None, mark_seen: bool = True) -> dict[str, Any]:
     _purge_expired_ios_tokens()
     auth = request.headers.get("authorization", "")
     bearer = auth[7:].strip() if auth.lower().startswith("bearer ") else None
     token = form_token or request.headers.get("x-volio-token") or bearer or request.query_params.get("token")
+    if token and token not in _ios_pairing_sessions:
+        persisted = _load_ios_pairing_token(token)
+        if persisted:
+            _ios_pairing_sessions[token] = persisted
     if not token or token not in _ios_pairing_sessions:
         raise HTTPException(status_code=401, detail="Pair Volio with Volio Desktop again.")
     session = _ios_pairing_sessions[token]
     if time.time() - session["created_at"] > int(session.get("ttl", IOS_PAIRING_TOKEN_TTL)):
         _ios_pairing_sessions.pop(token, None)
+        with connect() as con:
+            con.execute("DELETE FROM ios_pairing_tokens WHERE token = ?", (token,))
+            con.commit()
         raise HTTPException(status_code=401, detail="Pairing expired. Scan the QR code again.")
-    session["last_seen_at"] = now_iso()
+    if mark_seen:
+        session["last_seen_at"] = now_iso()
+        _persist_ios_pairing_token(token, session)
     return session
 
 
@@ -2457,7 +2758,7 @@ def create_ios_pairing_session(request: Request) -> dict[str, Any]:
     port = server_port()
     base_url = f"http://{ip}:{port}"
     _purge_expired_ios_tokens()
-    _ios_pairing_sessions[token] = {
+    session = {
         "host": ip,
         "host_name": host_name,
         "port": port,
@@ -2466,6 +2767,8 @@ def create_ios_pairing_session(request: Request) -> dict[str, Any]:
         "last_seen_at": None,
         "ttl": ttl,
     }
+    _ios_pairing_sessions[token] = session
+    _persist_ios_pairing_token(token, session)
     pairing_payload = {
         "type": "volio-ios-pairing",
         "version": 1,
@@ -2496,7 +2799,7 @@ def create_ios_pairing_session(request: Request) -> dict[str, Any]:
 
 @app.get("/api/ios/pairing/session/{token}")
 def get_ios_pairing_session(token: str, request: Request) -> dict[str, Any]:
-    session = _require_ios_pairing(request, form_token=token)
+    session = _require_ios_pairing(request, form_token=token, mark_seen=False)
     remaining = int(session.get("ttl", IOS_PAIRING_TOKEN_TTL)) - int(time.time() - session["created_at"])
     return {
         "valid": True,
@@ -2590,6 +2893,12 @@ async def ios_update_artwork(artwork_id: str, request: Request, payload: dict[st
     return await update_artwork(artwork_id, payload)
 
 
+@app.delete("/api/ios/artworks/{artwork_id}")
+def ios_delete_artwork(artwork_id: str, request: Request) -> dict[str, Any]:
+    _require_ios_pairing(request)
+    return delete_artwork(artwork_id)
+
+
 @app.post("/api/ios/artworks/{artwork_id}/analyze")
 def ios_analyze_one(artwork_id: str, request: Request, background_tasks: BackgroundTasks) -> dict[str, Any]:
     _require_ios_pairing(request)
@@ -2600,6 +2909,136 @@ def ios_analyze_one(artwork_id: str, request: Request, background_tasks: Backgro
 def ios_ai_queue_status(request: Request) -> dict[str, Any]:
     _require_ios_pairing(request)
     return _queue_status_payload()
+
+
+@app.get("/api/ios/process/jobs")
+def ios_process_jobs(request: Request) -> dict[str, Any]:
+    _require_ios_pairing(request)
+    with connect() as con:
+        rows = con.execute(
+            """
+            SELECT *
+            FROM processor_jobs
+            ORDER BY created_at DESC
+            LIMIT 100
+            """
+        ).fetchall()
+        counts = con.execute(
+            """
+            SELECT status, COUNT(*) AS count
+            FROM processor_jobs
+            GROUP BY status
+            """
+        ).fetchall()
+    return {
+        "jobs": [processor_job_payload(row) for row in rows],
+        "counts": {row["status"]: row["count"] for row in counts},
+        "worker_active": _processor_worker_active,
+    }
+
+
+@app.post("/api/ios/process/jobs")
+def ios_create_process_job(
+    request: Request,
+    token: str = Form(""),
+    work_id: str = Form(""),
+    work_type: str = Form("paper"),
+    title: str = Form(""),
+    created_around_kind: str = Form(""),
+    created_around_label: str = Form(""),
+    created_around_year: str = Form(""),
+    created_around_month: str = Form(""),
+    created_around_season: str = Form(""),
+    created_around_age_months: str = Form(""),
+    file: UploadFile = File(...),
+) -> dict[str, Any]:
+    _require_ios_pairing(request, form_token=token or None)
+    if not work_id.strip():
+        raise HTTPException(status_code=400, detail="work_id is required")
+    original_name = file.filename or f"{work_id}.jpg"
+    ext = Path(original_name).suffix.lower() or ".jpg"
+    if ext == ".jpeg":
+        ext = ".jpg"
+    if ext not in SUPPORTED_EXTS:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {original_name}")
+    job_id = str(uuid.uuid4())
+    safe_name = slug_text(work_id, "work")
+    job_dir = PROCESSOR_JOBS_DIR / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    dest = job_dir / f"{safe_name}.jpg"
+    with dest.open("wb") as out:
+        shutil.copyfileobj(file.file, out)
+    # Validate and normalize the image so the worker gets predictable RGB JPEG/WEBP input.
+    image = open_uploaded_image(dest)
+    image.thumbnail((1800, 1800))
+    image.save(dest, "JPEG", quality=90)
+    ts = now_iso()
+    rel_path = str(dest.relative_to(ROOT))
+    with connect() as con:
+        con.execute(
+            """
+            INSERT INTO processor_jobs (
+              id, token_hint, source, work_id, work_type, title,
+              created_around_kind, created_around_label, created_around_year,
+              created_around_month, created_around_season, created_around_age_months,
+              file_path, status, created_at, updated_at
+            )
+            VALUES (?, ?, 'ios', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+            """,
+            (
+                job_id,
+                (token or request.headers.get("x-volio-token") or "")[:8],
+                work_id,
+                work_type or "paper",
+                title or None,
+                created_around_kind or None,
+                created_around_label or None,
+                parse_int(created_around_year),
+                parse_int(created_around_month),
+                created_around_season or None,
+                parse_int(created_around_age_months),
+                rel_path,
+                ts,
+                ts,
+            ),
+        )
+        con.commit()
+        row = con.execute("SELECT * FROM processor_jobs WHERE id = ?", (job_id,)).fetchone()
+    start_processor_worker()
+    return processor_job_payload(row)
+
+
+@app.get("/api/ios/process/jobs/{job_id}")
+def ios_get_process_job(job_id: str, request: Request) -> dict[str, Any]:
+    _require_ios_pairing(request)
+    with connect() as con:
+        row = con.execute("SELECT * FROM processor_jobs WHERE id = ?", (job_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Processing job not found")
+    return processor_job_payload(row)
+
+
+@app.post("/api/ios/process/jobs/{job_id}/retry")
+def ios_retry_process_job(job_id: str, request: Request) -> dict[str, Any]:
+    _require_ios_pairing(request)
+    with connect() as con:
+        row = con.execute("SELECT * FROM processor_jobs WHERE id = ?", (job_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Processing job not found")
+        con.execute(
+            """
+            UPDATE processor_jobs
+            SET status = 'queued',
+                error_message = NULL,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (now_iso(), job_id),
+        )
+        con.commit()
+        row = con.execute("SELECT * FROM processor_jobs WHERE id = ?", (job_id,)).fetchone()
+    start_processor_worker()
+    return processor_job_payload(row)
 
 
 @app.post("/api/ios/import")
@@ -2614,6 +3053,7 @@ def ios_import_images(
     date_precision: str = Form(""),
     date_note: str = Form(""),
     child_age_months: str = Form(""),
+    client_work_id: str = Form(""),
     work_type: str = Form("paper"),
     auto_analyze: str = Form("true"),
     files: list[UploadFile] = File(...),
@@ -2656,6 +3096,7 @@ def ios_import_images(
                 date_precision or None,
                 age_months,
                 work_type,
+                client_work_id if len(files) == 1 else None,
             ))
         con.commit()
     for item in imported:

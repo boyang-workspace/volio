@@ -3,7 +3,7 @@ import { useVolio } from '../VolioContext'
 
 function WorkCard({ work, isSelected, onSelect, square }) {
   const { t } = useVolio()
-  const path = work.thumbnail_url || work.thumbnail || work.display_url || work.original_url || work.path || ''
+  const path = work.original_url || work.path || work.thumbnail_url || work.thumbnail || work.display_url || ''
   const title = work.title || 'Untitled'
   const needsAI = work.ai_status !== 'completed' || (!work.description && !work.long_description)
   const failed = work.ai_status === 'failed'

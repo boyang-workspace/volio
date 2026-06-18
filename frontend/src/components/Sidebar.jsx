@@ -63,6 +63,7 @@ function RailGroup({ children }) {
 export default function Sidebar() {
   const {
     facets, children, currentChild, currentNav, currentTagFilter,
+    processor,
     selectNav, selectSmartPortfolio, setCurrentChild,
     setImportModalOpen, setIosPairingOpen, setSettingsOpen,
     reloadAll,
@@ -145,10 +146,15 @@ export default function Sidebar() {
   }, [manualRun, queue.pending, queue.processing, queue.worker_active])
 
   const total = Number(queue.pending || 0) + Number(queue.processing || 0)
+  const processorWaiting = Number(processor?.queued || 0)
+  const processorWorking = Number(processor?.processing || 0)
+  const processorFailed = Number(processor?.failed || 0)
+  const processorDone = Number(processor?.succeeded || 0)
+  const processorActive = processorWaiting + processorWorking
   const tagGroups = facets?.tags
   const smartItems = facets?.smart || []
   const countFor = id => smartItems.find(item => item.id === id)?.count
-  const statusLabel = queue.paused ? t('paused') : total > 0 || queue.worker_active || manualRun ? t('working') : t('ready')
+  const statusLabel = queue.paused ? t('paused') : total > 0 || queue.worker_active || manualRun || processorActive > 0 ? t('working') : t('ready')
   const progressValue = manualRun ? progress : total > 0 || queue.worker_active ? 58 : 0
   const phoneConnected = Boolean(mobileSession?.token)
   const iosConnected = Boolean(iosPairingSession?.token)
@@ -189,7 +195,7 @@ export default function Sidebar() {
                 ? 'text-[#248a3d] bg-[#ecf8f0] border-[#cdeed7] hover:bg-[#dff3e7]'
                 : 'text-[#5f5f66] bg-[#f5f5f7] border-transparent hover:bg-[#e5e5e5]')
             }
-            title={phoneConnected || iosConnected ? t('phoneConnected') : t('phoneImport')}
+            title={iosConnected ? t('iphonePaired') : t('connectIphone')}
           >
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="shrink-0">
               <rect x="3" y="0.5" width="10" height="15" rx="2" stroke="currentColor" strokeWidth="1.3"/>
@@ -287,10 +293,15 @@ export default function Sidebar() {
                   {t('aiProcessing')}
                 </div>
                 <div className="text-[11px] text-[#8e8e93]">
-                  {t('runningCount', { count: queue.processing })} · {t('waitingCount', { count: queue.pending })}
+                  {t('runningCount', { count: queue.processing + processorWorking })} · {t('waitingCount', { count: queue.pending + processorWaiting })}
                 </div>
               </div>
               <div className="mt-0.5 text-sm font-semibold text-[#1d1d1f]">{statusLabel}</div>
+              {(processorWaiting > 0 || processorWorking > 0 || processorFailed > 0 || processorDone > 0) && (
+                <div className="mt-0.5 text-[11px] text-[#8e8e93]">
+                  Mac Assist · {processorWorking} processing · {processorWaiting} waiting{processorFailed ? ` · ${processorFailed} failed` : ''}
+                </div>
+              )}
             </div>
           </div>
 
