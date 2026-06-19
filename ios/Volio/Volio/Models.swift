@@ -423,6 +423,7 @@ final class VolioSession {
     }
 
     private func apply(remote: Artwork, to local: LocalWork) {
+        local.store(remoteArtwork: remote)
         if let title = remote.title, !title.isEmpty { local.title = title }
         if let note = remote.parentNote { local.note = note }
         if let quote = remote.childQuote { local.childQuote = quote }
@@ -430,7 +431,9 @@ final class VolioSession {
         let longDescription = cleanText(remote.longDescription)
         local.aiDescription = longDescription == local.aiBrief ? nil : longDescription
         if let tags = remote.tags?.map(\.name), !tags.isEmpty { local.aiTags = tags.joined(separator: ", ") }
+        if let medium = remote.medium { local.aiMaterials = medium }
         if let workType = remote.workType { local.workType = workType }
+        if let physicalStatus = remote.physicalStatus { local.physicalStatus = physicalStatus }
         local.isFavorite = remote.isFavorite?.boolValue ?? local.isFavorite
         local.isRepresentative = remote.isRepresentative?.boolValue ?? local.isRepresentative
         local.remoteUpdatedAt = remote.updatedAt

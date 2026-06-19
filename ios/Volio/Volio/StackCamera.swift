@@ -37,7 +37,6 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
     private var isCapturing = false
     private var pendingCapture = false
     private var flashOn = false
-    private var lastCaptureOrientation: AVCaptureVideoOrientation = .portrait
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -50,20 +49,8 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        UIDevice.current.beginGeneratingDeviceOrientationNotifications()
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(deviceOrientationDidChange),
-            name: UIDevice.orientationDidChangeNotification,
-            object: nil
-        )
-        updateVideoOrientation()
-    }
-
-    override func viewDidDisappear(_ animated: Bool) {
-        super.viewDidDisappear(animated)
-        NotificationCenter.default.removeObserver(self, name: UIDevice.orientationDidChangeNotification, object: nil)
-        UIDevice.current.endGeneratingDeviceOrientationNotifications()
+        layoutPreviewContainer()
+        previewLayer?.frame = previewContainer.bounds
     }
 
     override func viewDidLayoutSubviews() {
@@ -103,7 +90,6 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
                 preview.frame = self.previewContainer.bounds
                 self.previewContainer.layer.insertSublayer(preview, at: 0)
                 self.previewLayer = preview
-                self.updateVideoOrientation()
             }
 
             self.captureSession.startRunning()
@@ -262,11 +248,9 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
             }
         })
 
-        lastCaptureOrientation = currentVideoOrientation()
         let settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
         settings.flashMode = flashOn ? .on : .off
         settings.photoQualityPrioritization = .speed
-        updateVideoOrientation()
         photoOutput.capturePhoto(with: settings, delegate: self)
     }
 
@@ -299,22 +283,20 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
             return
         }
 
-        let orientation = lastCaptureOrientation
-        DispatchQueue.global(qos: .userInitiated).async { [weak self, data, orientation] in
-            let prepared = Self.preparePhoto(data, orientation: orientation)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, data] in
+            let prepared = Self.preparePhoto(data)
             DispatchQueue.main.async {
                 self?.completeCapture(jpeg: prepared.jpeg, preview: prepared.image)
             }
         }
     }
 
-    private static func preparePhoto(_ data: Data, orientation: AVCaptureVideoOrientation) -> (jpeg: Data, image: UIImage?) {
+    private static func preparePhoto(_ data: Data) -> (jpeg: Data, image: UIImage?) {
         guard let uiImage = UIImage(data: data) else {
             return (data, nil)
         }
         let normalized = normalize(uiImage)
-        let oriented = forceOrientation(normalized, for: orientation)
-        return (oriented.jpegData(compressionQuality: 0.92) ?? data, oriented)
+        return (normalized.jpegData(compressionQuality: 0.92) ?? data, normalized)
     }
 
     private static func normalize(_ image: UIImage) -> UIImage {
@@ -322,33 +304,6 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
         let renderer = UIGraphicsImageRenderer(size: image.size)
         return renderer.image { _ in
             image.draw(in: CGRect(origin: .zero, size: image.size))
-        }
-    }
-
-    private static func forceOrientation(_ image: UIImage, for orientation: AVCaptureVideoOrientation) -> UIImage {
-        switch orientation {
-        case .landscapeLeft where image.size.height > image.size.width:
-            return rotate(image, radians: -.pi / 2)
-        case .landscapeRight where image.size.height > image.size.width:
-            return rotate(image, radians: .pi / 2)
-        default:
-            return image
-        }
-    }
-
-    private static func rotate(_ image: UIImage, radians: CGFloat) -> UIImage {
-        let newSize = CGSize(width: image.size.height, height: image.size.width)
-        let renderer = UIGraphicsImageRenderer(size: newSize)
-        return renderer.image { context in
-            let cgContext = context.cgContext
-            cgContext.translateBy(x: newSize.width / 2, y: newSize.height / 2)
-            cgContext.rotate(by: radians)
-            image.draw(in: CGRect(
-                x: -image.size.width / 2,
-                y: -image.size.height / 2,
-                width: image.size.width,
-                height: image.size.height
-            ))
         }
     }
 
@@ -380,44 +335,6 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
         UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut]) {
             self.previewImageView.alpha = 1
             self.previewImageView.transform = .identity
-        }
-    }
-
-    @objc private func deviceOrientationDidChange() {
-        layoutPreviewContainer()
-        previewLayer?.frame = previewContainer.bounds
-        updateVideoOrientation()
-    }
-
-    private func updateVideoOrientation() {
-        let orientation = currentVideoOrientation()
-        if let connection = previewLayer?.connection, connection.isVideoOrientationSupported {
-            connection.videoOrientation = orientation
-        }
-        if let connection = photoOutput.connection(with: .video), connection.isVideoOrientationSupported {
-            connection.videoOrientation = orientation
-        }
-    }
-
-    private func currentVideoOrientation() -> AVCaptureVideoOrientation {
-        switch UIDevice.current.orientation {
-        case .landscapeLeft:
-            return .landscapeRight
-        case .landscapeRight:
-            return .landscapeLeft
-        case .portraitUpsideDown:
-            return .portraitUpsideDown
-        default:
-            switch view.window?.windowScene?.interfaceOrientation {
-            case .landscapeLeft:
-                return .landscapeLeft
-            case .landscapeRight:
-                return .landscapeRight
-            case .portraitUpsideDown:
-                return .portraitUpsideDown
-            default:
-                return .portrait
-            }
         }
     }
 

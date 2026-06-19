@@ -18,41 +18,13 @@ struct ContentView: View {
 struct RootTabsView: View {
     @Environment(VolioSession.self) private var session
     @State private var selectedTab: MainTab = .gallery
+    @State private var lastContentTab: MainTab = .gallery
     @State private var showCamera = false
     @State private var showPhotoPicker = false
     @State private var photoPickerItems: [PhotosPickerItem] = []
 
     var body: some View {
-        ZStack(alignment: .bottomTrailing) {
-            TabView(selection: $selectedTab) {
-                GalleryView()
-                    .tag(MainTab.gallery)
-
-                TimelineView()
-                    .tag(MainTab.timeline)
-
-                SearchView()
-                    .tag(MainTab.search)
-            }
-            .tint(VolioTheme.accent)
-            .toolbar(.hidden, for: .tabBar)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            if !session.isShowingDetail {
-                HStack(alignment: .center, spacing: 16) {
-                    NativeTabCluster(selectedTab: $selectedTab)
-                        .frame(width: 250, height: 68)
-                    Spacer(minLength: 16)
-                    FloatingCaptureButton {
-                        showCamera = true
-                    }
-                }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 12)
-                .transition(.scale(scale: 0.9).combined(with: .opacity))
-                .zIndex(20)
-            }
-        }
+        rootShell
         .tint(VolioTheme.accent)
         .fullScreenCover(isPresented: $showCamera) {
             StackCameraView(
@@ -92,6 +64,21 @@ struct RootTabsView: View {
             }
         }
         .animation(.spring(duration: 0.3), value: session.errorMessage != nil)
+    }
+
+    @ViewBuilder
+    private var rootShell: some View {
+        if #available(iOS 18.0, *) {
+            SystemRootTabsView(
+                selectedTab: $selectedTab,
+                lastContentTab: $lastContentTab,
+                showCamera: $showCamera
+            )
+        } else {
+            LegacyRootTabsView(selectedTab: $selectedTab) {
+                showCamera = true
+            }
+        }
     }
 
     @MainActor
@@ -136,18 +123,113 @@ enum MainTab: String, CaseIterable, Identifiable {
         case .capture: "camera.fill"
         }
     }
+
+    static var contentTabs: [MainTab] { [.gallery, .timeline, .search] }
+}
+
+@available(iOS 18.0, *)
+private struct SystemRootTabsView: View {
+    @Environment(VolioSession.self) private var session
+    @Binding var selectedTab: MainTab
+    @Binding var lastContentTab: MainTab
+    @Binding var showCamera: Bool
+
+    private var tabSelection: Binding<MainTab> {
+        Binding(
+            get: { selectedTab },
+            set: { newValue in
+                if newValue == .capture {
+                    showCamera = true
+                    selectedTab = lastContentTab
+                } else {
+                    selectedTab = newValue
+                    lastContentTab = newValue
+                }
+            }
+        )
+    }
+
+    var body: some View {
+        TabView(selection: tabSelection) {
+            Tab(MainTab.gallery.title, systemImage: MainTab.gallery.icon, value: MainTab.gallery) {
+                GalleryView()
+            }
+
+            Tab(MainTab.timeline.title, systemImage: MainTab.timeline.icon, value: MainTab.timeline) {
+                TimelineView()
+            }
+
+            Tab(MainTab.search.title, systemImage: MainTab.search.icon, value: MainTab.search) {
+                SearchView()
+            }
+
+            cameraTab
+        }
+        .toolbar(session.isShowingDetail ? .hidden : .visible, for: .tabBar)
+        .volioStableSystemTabBar()
+    }
+
+    @TabContentBuilder<MainTab>
+    private var cameraTab: some TabContent<MainTab> {
+        if #available(iOS 27.0, *) {
+            Tab(MainTab.capture.title, systemImage: MainTab.capture.icon, value: MainTab.capture, role: .prominent) {
+                Color.clear
+            }
+        } else {
+            Tab(MainTab.capture.title, systemImage: MainTab.capture.icon, value: MainTab.capture, role: .search) {
+                Color.clear
+            }
+        }
+    }
+}
+
+private struct LegacyRootTabsView: View {
+    @Environment(VolioSession.self) private var session
+    @Binding var selectedTab: MainTab
+    var onCapture: () -> Void
+
+    var body: some View {
+        ZStack {
+            Group {
+                switch selectedTab {
+                case .gallery:
+                    GalleryView()
+                case .timeline:
+                    TimelineView()
+                case .search:
+                    SearchView()
+                case .capture:
+                    GalleryView()
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .overlay(alignment: .bottom) {
+            if !session.isShowingDetail {
+                FloatingBottomControls(selectedTab: $selectedTab) {
+                    onCapture()
+                }
+                .transition(.scale(scale: 0.9).combined(with: .opacity))
+                .zIndex(20)
+            }
+        }
+    }
 }
 
 private struct NativeTabCluster: UIViewRepresentable {
     @Binding var selectedTab: MainTab
-    private static let tabs: [MainTab] = [.gallery, .timeline, .search]
+    private static let tabs = MainTab.contentTabs
+    private let horizontalPressOverflow: CGFloat = 18
 
     func makeCoordinator() -> Coordinator {
         Coordinator(selectedTab: $selectedTab)
     }
 
-    func makeUIView(context: Context) -> UITabBar {
-        let tabBar = UITabBar()
+    func makeUIView(context: Context) -> TabBarContainerView {
+        let container = TabBarContainerView(
+            horizontalPressOverflow: horizontalPressOverflow
+        )
+        let tabBar = container.tabBar
         tabBar.delegate = context.coordinator
         tabBar.items = Self.tabs.enumerated().map { index, tab in
             UITabBarItem(title: tab.title, image: UIImage(systemName: tab.icon), tag: index)
@@ -155,9 +237,7 @@ private struct NativeTabCluster: UIViewRepresentable {
         tabBar.itemPositioning = .fill
         tabBar.tintColor = UIColor(red: 0.94, green: 0.33, blue: 0.20, alpha: 1)
         tabBar.unselectedItemTintColor = .secondaryLabel
-        tabBar.clipsToBounds = true
-        tabBar.layer.cornerRadius = 24
-        tabBar.layer.cornerCurve = .continuous
+        tabBar.clipsToBounds = false
 
         let appearance = UITabBarAppearance()
         appearance.configureWithDefaultBackground()
@@ -168,11 +248,13 @@ private struct NativeTabCluster: UIViewRepresentable {
         tabBar.standardAppearance = appearance
         tabBar.scrollEdgeAppearance = appearance
         updateSelection(tabBar)
-        return tabBar
+        return container
     }
 
-    func updateUIView(_ uiView: UITabBar, context: Context) {
-        updateSelection(uiView)
+    func updateUIView(_ uiView: TabBarContainerView, context: Context) {
+        uiView.horizontalPressOverflow = horizontalPressOverflow
+        uiView.setNeedsLayout()
+        updateSelection(uiView.tabBar)
     }
 
     private func updateSelection(_ tabBar: UITabBar) {
@@ -195,20 +277,57 @@ private struct NativeTabCluster: UIViewRepresentable {
             selectedTab.wrappedValue = NativeTabCluster.tabs[item.tag]
         }
     }
+
+    final class TabBarContainerView: UIView {
+        let tabBar = UITabBar()
+        var horizontalPressOverflow: CGFloat
+
+        init(horizontalPressOverflow: CGFloat) {
+            self.horizontalPressOverflow = horizontalPressOverflow
+            super.init(frame: .zero)
+            clipsToBounds = false
+            backgroundColor = .clear
+            addSubview(tabBar)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            clipsToBounds = false
+            layer.masksToBounds = false
+
+            tabBar.frame = CGRect(
+                x: horizontalPressOverflow,
+                y: 0,
+                width: max(1, bounds.width - horizontalPressOverflow * 2),
+                height: bounds.height
+            )
+            tabBar.clipsToBounds = false
+            tabBar.layer.masksToBounds = false
+        }
+    }
 }
 
 private struct FloatingCaptureButton: View {
     var onCapture: () -> Void
+    private let buttonSize: CGFloat = 68
 
     var body: some View {
-        Button(action: onCapture) {
-            Image(systemName: MainTab.capture.icon)
-                .font(.system(size: 25, weight: .bold))
-                .frame(width: 68, height: 68)
+        ZStack {
+            Button(action: onCapture) {
+                Image(systemName: "camera.fill")
+                    .font(.system(size: 25, weight: .bold))
+                    .frame(width: buttonSize, height: buttonSize)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Capture")
+            .modifier(CaptureButtonChrome())
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Capture")
-        .modifier(CaptureButtonChrome())
+        .frame(width: buttonSize, height: buttonSize, alignment: .center)
     }
 }
 
@@ -228,7 +347,53 @@ private struct CaptureButtonChrome: ViewModifier {
     }
 }
 
+// MARK: - Bottom Controls
+
+private struct FloatingBottomControls: View {
+    @Binding var selectedTab: MainTab
+    var onCapture: () -> Void
+
+    private let horizontalInset: CGFloat = 20
+    private let controlHeight: CGFloat = 92
+    private let tabWidth: CGFloat = 268
+    private let tabPressOverflow: CGFloat = 18
+    private let cameraSize: CGFloat = 68
+    private let bottomPadding: CGFloat = 2
+
+    var body: some View {
+        GeometryReader { proxy in
+            let tabVisualLeft = horizontalInset - 2
+            let tabCenterX = tabVisualLeft + tabWidth / 2
+            let tabFrameWidth = tabWidth + 2 * tabPressOverflow
+            let cameraCenterX = proxy.size.width - horizontalInset - cameraSize / 2
+            let centerY = controlHeight / 2
+
+            NativeTabCluster(selectedTab: $selectedTab)
+                .frame(width: tabFrameWidth, height: controlHeight)
+                .position(x: tabCenterX, y: centerY)
+
+            FloatingCaptureButton {
+                onCapture()
+            }
+            .frame(width: cameraSize, height: cameraSize)
+            .position(x: cameraCenterX, y: centerY)
+        }
+        .frame(height: controlHeight)
+        .padding(.bottom, bottomPadding)
+        .allowsHitTesting(true)
+    }
+}
+
 extension View {
+    @ViewBuilder
+    func volioStableSystemTabBar() -> some View {
+        if #available(iOS 26.0, *) {
+            self.tabBarMinimizeBehavior(.never)
+        } else {
+            self
+        }
+    }
+
     @ViewBuilder
     func volioGlass(cornerRadius: CGFloat, tint: Color = VolioTheme.glassTint, interactive: Bool = false) -> some View {
         if #available(iOS 26.0, *) {

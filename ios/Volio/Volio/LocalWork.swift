@@ -24,6 +24,7 @@ final class LocalWork {
     var thumbnailPath: String?
     var remoteArtworkId: String?
     var remoteUpdatedAt: String?
+    var remoteArtworkJSON: String?
     var localUpdatedAt: Date?
     var lastSyncedAt: Date?
 
@@ -116,6 +117,7 @@ final class LocalWork {
         thumbnailPath: String? = nil,
         remoteArtworkId: String? = nil,
         remoteUpdatedAt: String? = nil,
+        remoteArtworkJSON: String? = nil,
         localUpdatedAt: Date? = Date(),
         lastSyncedAt: Date? = nil
     ) {
@@ -134,6 +136,7 @@ final class LocalWork {
         self.thumbnailPath = thumbnailPath
         self.remoteArtworkId = remoteArtworkId
         self.remoteUpdatedAt = remoteUpdatedAt
+        self.remoteArtworkJSON = remoteArtworkJSON
         self.localUpdatedAt = localUpdatedAt
         self.lastSyncedAt = lastSyncedAt
         self.isFavorite = false
@@ -141,6 +144,136 @@ final class LocalWork {
         self.physicalStatus = "undecided"
         self.processingStatus = "ready"
     }
+}
+
+extension LocalWork {
+    var macArtwork: Artwork? {
+        guard let remoteArtworkJSON,
+              let data = remoteArtworkJSON.data(using: .utf8)
+        else {
+            return nil
+        }
+        return try? JSONDecoder.volio.decode(Artwork.self, from: data)
+    }
+
+    func store(remoteArtwork: Artwork) {
+        guard let data = try? JSONEncoder().encode(remoteArtwork),
+              let json = String(data: data, encoding: .utf8)
+        else {
+            return
+        }
+        remoteArtworkJSON = json
+    }
+
+    func detailArtwork(profileName: String?) -> Artwork {
+        var artwork = macArtwork ?? Artwork(
+            id: remoteArtworkId ?? id,
+            childName: profileName,
+            title: title,
+            description: aiBrief,
+            longDescription: aiDescription,
+            childQuote: childQuote,
+            parentNote: note,
+            artworkDate: localDateString(from: capturedAt),
+            datePrecision: createdAroundKind,
+            dateNote: createdAroundLabel,
+            childAgeMonths: createdAroundAgeMonths ?? ageAtCreationMonths,
+            childAgeLabel: ageLabel(createdAroundAgeMonths ?? ageAtCreationMonths),
+            createdAroundLabel: createdAroundLabel,
+            timelineGroup: timelineGroupTitle,
+            workType: workType,
+            medium: aiMaterials,
+            physicalStatus: physicalStatus,
+            originalFilename: originalPath.map { URL(fileURLWithPath: $0).lastPathComponent },
+            aiStatus: processingStatus == "succeeded" ? "completed" : processingStatus,
+            aiError: processingError,
+            isFavorite: .bool(isFavorite),
+            isRepresentative: .bool(isRepresentative),
+            clientWorkId: id,
+            createdAt: localDateTimeString(from: createdAt),
+            updatedAt: localUpdatedAt.map { localDateTimeString(from: $0) },
+            tags: localArtworkTags
+        )
+
+        artwork.title = title ?? artwork.title
+        artwork.description = aiBrief ?? artwork.description
+        artwork.longDescription = aiDescription ?? artwork.longDescription
+        artwork.childQuote = childQuote ?? artwork.childQuote
+        artwork.parentNote = note ?? artwork.parentNote
+        artwork.createdAroundLabel = artwork.createdAroundLabel ?? createdAroundLabel
+        artwork.timelineGroup = artwork.timelineGroup ?? timelineGroupTitle
+        artwork.workType = workType
+        artwork.medium = aiMaterials ?? artwork.medium
+        artwork.physicalStatus = physicalStatus
+        artwork.aiStatus = artwork.aiStatus ?? (processingStatus == "succeeded" ? "completed" : processingStatus)
+        artwork.aiError = processingError ?? artwork.aiError
+        artwork.isFavorite = .bool(isFavorite)
+        artwork.isRepresentative = .bool(isRepresentative)
+        artwork.tags = mergeTags(artwork.tags, localArtworkTags)
+        return artwork
+    }
+
+    private var localArtworkTags: [ArtworkTag]? {
+        let typedGroups: [(String?, String)] = [
+            (aiTags, "tag"),
+            (aiMaterials, "material"),
+            (aiThemes, "theme"),
+            (aiColors, "color")
+        ]
+        let tags = typedGroups.flatMap { values, type in
+            splitCSV(values).map { ArtworkTag(name: $0, type: type, source: "ios") }
+        }
+        return tags.isEmpty ? nil : tags
+    }
+
+    private func mergeTags(_ primary: [ArtworkTag]?, _ secondary: [ArtworkTag]?) -> [ArtworkTag]? {
+        var seen = Set<String>()
+        let merged = ((primary ?? []) + (secondary ?? [])).filter { tag in
+            let key = "\(tag.type.lowercased()):\(tag.name.lowercased())"
+            if seen.contains(key) { return false }
+            seen.insert(key)
+            return true
+        }
+        return merged.isEmpty ? nil : merged
+    }
+
+    private func splitCSV(_ value: String?) -> [String] {
+        (value ?? "")
+            .components(separatedBy: CharacterSet(charactersIn: ",，"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    private func ageLabel(_ months: Int?) -> String? {
+        guard let months else { return nil }
+        let years = max(0, months) / 12
+        let extra = max(0, months) % 12
+        return extra == 0 ? "Age \(years)" : "Age \(years)y \(extra)m"
+    }
+
+    private func localDateString(from date: Date) -> String {
+        Self.localDayFormatter.string(from: date)
+    }
+
+    private func localDateTimeString(from date: Date) -> String {
+        Self.localDateTimeFormatter.string(from: date)
+    }
+
+    private static let localDayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
+
+    private static let localDateTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+        return formatter
+    }()
 }
 
 @Model

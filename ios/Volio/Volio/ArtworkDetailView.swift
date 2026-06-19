@@ -8,6 +8,9 @@ struct ArtworkDetailView: View {
     @State private var quoteText = ""
 
     private let accentColor = VolioTheme.accent
+    private var artwork: Artwork {
+        work.detailArtwork(profileName: session.profile.name)
+    }
 
     var body: some View {
         ScrollView {
@@ -25,7 +28,7 @@ struct ArtworkDetailView: View {
 
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(alignment: .top, spacing: 10) {
-                        Text(work.displayTitle)
+                        Text(displayTitle)
                             .font(.title2.bold())
                             .foregroundStyle(VolioTheme.ink)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -33,12 +36,12 @@ struct ArtworkDetailView: View {
                     }
 
                     HStack(spacing: 6) {
-                        Text(work.createdAroundLabel)
+                        Text(artwork.createdAroundLabel ?? work.createdAroundLabel)
                         Text("·")
-                        Text(work.workType.capitalized)
-                        if let age = work.ageAtCreationMonths ?? work.createdAroundAgeMonths {
+                        Text((artwork.workType ?? work.workType).capitalized)
+                        if let age = artwork.childAgeMonths ?? work.ageAtCreationMonths ?? work.createdAroundAgeMonths {
                             Text("·")
-                            Text(ageLabel(age))
+                            Text(artwork.childAgeLabel ?? ageLabel(age))
                         }
                     }
                     .font(.subheadline.weight(.medium))
@@ -125,7 +128,7 @@ struct ArtworkDetailView: View {
 
     private var detailSections: some View {
         VStack(alignment: .leading, spacing: 16) {
-            if let brief = work.aiBrief, !brief.isEmpty {
+            if let brief = clean(artwork.description) {
                 DetailSection("Brief") {
                     Text(brief)
                         .font(.body)
@@ -133,7 +136,7 @@ struct ArtworkDetailView: View {
                 }
             }
 
-            if let description = work.aiDescription, !description.isEmpty, description != work.aiBrief {
+            if let description = clean(artwork.longDescription), description != clean(artwork.description) {
                 DetailSection("Description") {
                     Text(description)
                         .font(.body)
@@ -143,7 +146,7 @@ struct ArtworkDetailView: View {
             }
 
             DetailSection("Tags") {
-                let tags = combinedTags
+                let tags = detailTags
                 if tags.isEmpty {
                     Text("No tags")
                         .font(.subheadline)
@@ -164,58 +167,64 @@ struct ArtworkDetailView: View {
 
             DetailSection("Personal Notes") {
                 VStack(spacing: 0) {
-                    DetailInfoRow(label: "Child Quote", value: work.childQuote)
-                    DetailInfoRow(label: "Parent Note", value: work.note)
-                    DetailInfoRow(label: "Story", value: nil)
+                    DetailInfoRow(label: "Child Quote", value: artwork.childQuote)
+                    DetailInfoRow(label: "Parent Note", value: artwork.parentNote)
+                    DetailInfoRow(label: "Story", value: artwork.story)
                 }
             }
 
             DetailSection("Artwork Info") {
                 VStack(spacing: 0) {
-                    DetailInfoRow(label: "Child", value: session.profile.name)
-                    DetailInfoRow(label: "Date", value: work.createdAroundLabel)
-                    DetailInfoRow(label: "Batch", value: nil)
-                    DetailInfoRow(label: "Type", value: work.workType.capitalized)
-                    DetailInfoRow(label: "Stage", value: nil)
-                    DetailInfoRow(label: "Medium", value: work.aiMaterials)
+                    DetailInfoRow(label: "Child", value: artwork.childName)
+                    DetailInfoRow(label: "Date", value: artwork.artworkDate ?? artwork.dateNote ?? artwork.createdAroundLabel)
+                    DetailInfoRow(label: "Batch", value: artwork.batchName)
+                    DetailInfoRow(label: "Type", value: artwork.workType)
+                    DetailInfoRow(label: "Stage", value: artwork.stage)
+                    DetailInfoRow(label: "Medium", value: artwork.medium)
                     DetailInfoRow(label: "Size", value: imageDimensions)
-                    DetailInfoRow(label: "Status", value: work.physicalStatus)
-                    DetailInfoRow(label: "AI", value: processingTitle)
-                    DetailInfoRow(label: "Locale", value: nil)
+                    DetailInfoRow(label: "Status", value: artwork.physicalStatus)
+                    DetailInfoRow(label: "AI", value: aiStatus)
+                    DetailInfoRow(label: "Locale", value: artwork.aiLocale)
                     DetailInfoRow(label: "File", value: fileName)
-                    DetailInfoRow(label: "Created", value: work.createdAt.formatted(date: .abbreviated, time: .shortened))
-                    DetailInfoRow(label: "Updated", value: work.localUpdatedAt?.formatted(date: .abbreviated, time: .shortened))
-                    DetailInfoRow(label: "Favorite", value: work.isFavorite ? "Yes" : "No")
-                    DetailInfoRow(label: "Representative", value: work.isRepresentative ? "Yes" : "No")
+                    DetailInfoRow(label: "Created", value: formattedServerDate(artwork.createdAt) ?? work.createdAt.formatted(date: .abbreviated, time: .shortened))
+                    DetailInfoRow(label: "Updated", value: formattedServerDate(artwork.updatedAt) ?? work.localUpdatedAt?.formatted(date: .abbreviated, time: .shortened))
+                    DetailInfoRow(label: "Favorite", value: (artwork.isFavorite?.boolValue ?? work.isFavorite) ? "Yes" : "No")
+                    DetailInfoRow(label: "Representative", value: (artwork.isRepresentative?.boolValue ?? work.isRepresentative) ? "Yes" : "No")
                 }
             }
 
             DetailSection("Sync") {
                 VStack(spacing: 0) {
                     DetailInfoRow(label: "Mac", value: work.remoteArtworkId == nil ? "Not synced" : "Synced")
-                    DetailInfoRow(label: "Updated", value: work.localUpdatedAt?.formatted(date: .abbreviated, time: .shortened))
-                    DetailInfoRow(label: "Remote ID", value: work.remoteArtworkId)
-                    DetailInfoRow(label: "Status", value: processingTitle)
+                    DetailInfoRow(label: "Updated", value: formattedServerDate(artwork.updatedAt) ?? work.localUpdatedAt?.formatted(date: .abbreviated, time: .shortened))
+                    DetailInfoRow(label: "Remote ID", value: artwork.id == work.id ? work.remoteArtworkId : artwork.id)
+                    DetailInfoRow(label: "Status", value: aiStatus ?? processingTitle)
                 }
             }
         }
         .padding(.horizontal, 16)
     }
 
-    private var combinedTags: [String] {
-        [
-            work.aiTags,
-            work.aiMaterials,
-            work.aiThemes,
-            work.aiColors
-        ]
-        .compactMap { $0 }
-        .flatMap { $0.components(separatedBy: CharacterSet(charactersIn: ",，")) }
-        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        .filter { !$0.isEmpty }
+    private var displayTitle: String {
+        clean(artwork.title) ?? clean(work.aiTitle) ?? clean(artwork.description).map { String($0.prefix(40)) } ?? "Untitled"
+    }
+
+    private var detailTags: [String] {
+        var seen = Set<String>()
+        return (artwork.tags ?? []).compactMap { tag in
+            let value = tag.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty else { return nil }
+            let key = value.lowercased()
+            guard !seen.contains(key) else { return nil }
+            seen.insert(key)
+            return value
+        }
     }
 
     private var imageDimensions: String? {
+        if let width = artwork.width, let height = artwork.height {
+            return "\(width) x \(height)"
+        }
         guard let path = work.originalPath,
               let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
               let image = UIImage(data: data)
@@ -226,8 +235,17 @@ struct ArtworkDetailView: View {
     }
 
     private var fileName: String? {
+        if let originalFilename = clean(artwork.originalFilename) {
+            return originalFilename
+        }
         guard let path = work.originalPath else { return nil }
         return URL(fileURLWithPath: path).lastPathComponent
+    }
+
+    private var aiStatus: String? {
+        let parts = [artwork.aiStatus, artwork.aiModel]
+            .compactMap { clean($0) }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     private var processingCard: some View {
@@ -302,6 +320,34 @@ struct ArtworkDetailView: View {
         let years = max(0, months) / 12
         let extra = max(0, months) % 12
         return extra == 0 ? "Age \(years)" : "Age \(years)y \(extra)m"
+    }
+
+    private func clean(_ value: String?) -> String? {
+        let text = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return text.isEmpty ? nil : text
+    }
+
+    private func formattedServerDate(_ value: String?) -> String? {
+        guard let value = clean(value) else { return nil }
+        let formats = [
+            "yyyy-MM-dd'T'HH:mm:ss.SSSSSS",
+            "yyyy-MM-dd'T'HH:mm:ss",
+            "yyyy-MM-dd HH:mm:ss",
+            "yyyy-MM-dd"
+        ]
+        for format in formats {
+            let formatter = DateFormatter()
+            formatter.calendar = Calendar(identifier: .gregorian)
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = format
+            if let date = formatter.date(from: value) {
+                return date.formatted(date: .abbreviated, time: format == "yyyy-MM-dd" ? .omitted : .shortened)
+            }
+        }
+        if let date = ISO8601DateFormatter().date(from: value) {
+            return date.formatted(date: .abbreviated, time: .shortened)
+        }
+        return value
     }
 }
 

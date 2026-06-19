@@ -259,9 +259,13 @@ struct MasonryGrid: View {
     var selectedIds = Set<String>()
     var onToggleSelection: (LocalWork) -> Void = { _ in }
 
+    private var sortedWorks: [LocalWork] {
+        works.sorted { $0.capturedAt > $1.capturedAt }
+    }
+
     var body: some View {
-        PinterestMasonryLayout(columns: 2, spacing: 10) {
-            ForEach(works) { work in
+        RowMasonryLayout(columns: 2, spacing: 10) {
+            ForEach(sortedWorks) { work in
                 if isSelecting {
                     MasonryTile(work: work)
                         .overlay(alignment: .topTrailing) {
@@ -371,30 +375,32 @@ struct MasonryImage: View {
     }
 }
 
-private struct PinterestMasonryLayout: Layout {
+private struct RowMasonryLayout: Layout {
     var columns: Int = 2
     var spacing: CGFloat = 10
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let width = proposal.width ?? 0
-        guard width > 0, !subviews.isEmpty else {
-            return CGSize(width: width, height: 0)
-        }
+        guard width > 0, !subviews.isEmpty else { return CGSize(width: width, height: 0) }
 
         let columnCount = max(1, columns)
         let columnWidth = (width - CGFloat(columnCount - 1) * spacing) / CGFloat(columnCount)
-        var heights = Array(repeating: CGFloat.zero, count: columnCount)
+        var totalHeight: CGFloat = 0
 
-        for subview in subviews {
-            let targetColumn = shortestColumn(in: heights)
-            let size = subview.sizeThatFits(ProposedViewSize(width: columnWidth, height: nil))
-            if heights[targetColumn] > 0 {
-                heights[targetColumn] += spacing
+        var rowStart = 0
+        while rowStart < subviews.count {
+            let rowEnd = min(rowStart + columnCount, subviews.count)
+            var rowHeight: CGFloat = 0
+            for i in rowStart..<rowEnd {
+                let size = subviews[i].sizeThatFits(ProposedViewSize(width: columnWidth, height: nil))
+                rowHeight = max(rowHeight, size.height)
             }
-            heights[targetColumn] += size.height
+            if rowStart > 0 { totalHeight += spacing }
+            totalHeight += rowHeight
+            rowStart = rowEnd
         }
 
-        return CGSize(width: width, height: heights.max() ?? 0)
+        return CGSize(width: width, height: totalHeight)
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
@@ -402,23 +408,30 @@ private struct PinterestMasonryLayout: Layout {
 
         let columnCount = max(1, columns)
         let columnWidth = (bounds.width - CGFloat(columnCount - 1) * spacing) / CGFloat(columnCount)
-        var heights = Array(repeating: bounds.minY, count: columnCount)
+        var currentY = bounds.minY
 
-        for subview in subviews {
-            let targetColumn = shortestColumn(in: heights)
-            let x = bounds.minX + CGFloat(targetColumn) * (columnWidth + spacing)
-            let y = heights[targetColumn]
-            let size = subview.sizeThatFits(ProposedViewSize(width: columnWidth, height: nil))
-            subview.place(
-                at: CGPoint(x: x, y: y),
-                proposal: ProposedViewSize(width: columnWidth, height: size.height)
-            )
-            heights[targetColumn] += size.height + spacing
+        var rowStart = 0
+        while rowStart < subviews.count {
+            let rowEnd = min(rowStart + columnCount, subviews.count)
+
+            var rowHeight: CGFloat = 0
+            for i in rowStart..<rowEnd {
+                let size = subviews[i].sizeThatFits(ProposedViewSize(width: columnWidth, height: nil))
+                rowHeight = max(rowHeight, size.height)
+            }
+
+            for (offset, i) in (rowStart..<rowEnd).enumerated() {
+                let x = bounds.minX + CGFloat(offset) * (columnWidth + spacing)
+                let size = subviews[i].sizeThatFits(ProposedViewSize(width: columnWidth, height: nil))
+                subviews[i].place(
+                    at: CGPoint(x: x, y: currentY),
+                    proposal: ProposedViewSize(width: columnWidth, height: size.height)
+                )
+            }
+
+            currentY += rowHeight + spacing
+            rowStart = rowEnd
         }
-    }
-
-    private func shortestColumn(in heights: [CGFloat]) -> Int {
-        heights.enumerated().min(by: { $0.element < $1.element })?.offset ?? 0
     }
 }
 
