@@ -83,8 +83,6 @@ final class VolioSession {
     ) -> LocalWork {
         let id = UUID().uuidString
         let originalPath = ImageStorage.saveOriginal(id: id, data: data)
-        let thumbData = ImageStorage.generateThumbnail(from: data)
-        let thumbPath = ImageStorage.saveThumbnail(id: id, data: thumbData)
         let capturedAt = Date()
         let normalized = createdAround.normalized(profile: profile, capturedAt: capturedAt)
 
@@ -101,15 +99,26 @@ final class VolioSession {
             createdAroundAgeMonths: normalized.ageMonths,
             ageAtCreationMonths: normalized.ageMonths,
             originalPath: originalPath,
-            thumbnailPath: thumbPath
+            thumbnailPath: originalPath
         )
         let originalAsset = LocalAsset(workId: id, role: "original", localPath: originalPath)
-        let thumbnailAsset = LocalAsset(workId: id, role: "thumbnail", localPath: thumbPath)
+        let thumbnailAsset = LocalAsset(workId: id, role: "thumbnail", localPath: originalPath)
         modelContext?.insert(work)
         modelContext?.insert(originalAsset)
         modelContext?.insert(thumbnailAsset)
         works.insert(work, at: 0)
         try? modelContext?.save()
+
+        Task.detached(priority: .utility) { [id] in
+            let thumbData = ImageStorage.generateThumbnail(from: data)
+            let thumbPath = ImageStorage.saveThumbnail(id: id, data: thumbData)
+            Task { @MainActor in
+                work.thumbnailPath = thumbPath
+                thumbnailAsset.localPath = thumbPath
+                try? self.modelContext?.save()
+            }
+        }
+
         if autoProcess {
             syncMacLibraryCopy(for: work, data: data)
             enqueueMacProcessing(for: work, assetIds: [originalAsset.id], data: data)

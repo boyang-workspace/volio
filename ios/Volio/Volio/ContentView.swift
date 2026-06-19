@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftData
 import PhotosUI
 import UIKit
+import AVFoundation
 
 struct ContentView: View {
     @Environment(VolioSession.self) private var session
@@ -20,22 +21,20 @@ struct RootTabsView: View {
     @State private var selectedTab: MainTab = .gallery
     @State private var lastContentTab: MainTab = .gallery
     @State private var showCamera = false
+    @State private var showAddMenu = false
+    @State private var isAddControlSuppressed = false
     @State private var showPhotoPicker = false
     @State private var photoPickerItems: [PhotosPickerItem] = []
 
     var body: some View {
         rootShell
         .tint(VolioTheme.accent)
+        .environment(\.dismissVolioTransientOverlays, dismissTransientOverlays)
+        .environment(\.setVolioAddControlSuppressed, setAddControlSuppressed)
         .fullScreenCover(isPresented: $showCamera) {
             StackCameraView(
                 onCapture: { data in
                     session.createWork(data: data, workType: "visual", createdAround: .capturedDate)
-                },
-                onImportPhotos: {
-                    showCamera = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                        showPhotoPicker = true
-                    }
                 }
             )
             .ignoresSafeArea()
@@ -72,12 +71,54 @@ struct RootTabsView: View {
             SystemRootTabsView(
                 selectedTab: $selectedTab,
                 lastContentTab: $lastContentTab,
-                showCamera: $showCamera
+                showCamera: $showCamera,
+                showAddMenu: $showAddMenu,
+                isAddControlSuppressed: $isAddControlSuppressed,
+                showPhotoPicker: $showPhotoPicker
             )
         } else {
-            LegacyRootTabsView(selectedTab: $selectedTab) {
-                showCamera = true
-            }
+            LegacyRootTabsView(
+                selectedTab: $selectedTab,
+                showAddMenu: $showAddMenu,
+                isAddControlSuppressed: $isAddControlSuppressed,
+                showCamera: $showCamera,
+                showPhotoPicker: $showPhotoPicker,
+                onAdd: toggleAddMenu
+            )
+        }
+    }
+
+    private func toggleAddMenu() {
+        guard !isAddControlSuppressed else { return }
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+            showAddMenu.toggle()
+        }
+        if showAddMenu {
+            prewarmCameraAccess()
+        }
+    }
+
+    private func prewarmCameraAccess() {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .video) { _ in }
+        default:
+            break
+        }
+    }
+
+    private func dismissTransientOverlays() {
+        guard showAddMenu else { return }
+        withAnimation(.spring(response: 0.24, dampingFraction: 0.9)) {
+            showAddMenu = false
+        }
+    }
+
+    private func setAddControlSuppressed(_ isSuppressed: Bool) {
+        guard isAddControlSuppressed != isSuppressed else { return }
+        isAddControlSuppressed = isSuppressed
+        if isSuppressed {
+            dismissTransientOverlays()
         }
     }
 
@@ -96,6 +137,28 @@ struct RootTabsView: View {
             session.createWork(data: jpeg, workType: "visual", createdAround: .capturedDate)
         }
         photoPickerItems.removeAll()
+    }
+}
+
+private struct DismissVolioTransientOverlaysKey: EnvironmentKey {
+    static let defaultValue: () -> Void = {}
+}
+
+extension EnvironmentValues {
+    var dismissVolioTransientOverlays: () -> Void {
+        get { self[DismissVolioTransientOverlaysKey.self] }
+        set { self[DismissVolioTransientOverlaysKey.self] = newValue }
+    }
+}
+
+private struct SetVolioAddControlSuppressedKey: EnvironmentKey {
+    static let defaultValue: (Bool) -> Void = { _ in }
+}
+
+extension EnvironmentValues {
+    var setVolioAddControlSuppressed: (Bool) -> Void {
+        get { self[SetVolioAddControlSuppressedKey.self] }
+        set { self[SetVolioAddControlSuppressedKey.self] = newValue }
     }
 }
 
@@ -120,7 +183,7 @@ enum MainTab: String, CaseIterable, Identifiable {
         case .gallery: "square.grid.2x2"
         case .timeline: "clock"
         case .search: "magnifyingglass"
-        case .capture: "camera.fill"
+        case .capture: "plus"
         }
     }
 
@@ -133,15 +196,20 @@ private struct SystemRootTabsView: View {
     @Binding var selectedTab: MainTab
     @Binding var lastContentTab: MainTab
     @Binding var showCamera: Bool
+    @Binding var showAddMenu: Bool
+    @Binding var isAddControlSuppressed: Bool
+    @Binding var showPhotoPicker: Bool
 
     private var tabSelection: Binding<MainTab> {
         Binding(
             get: { selectedTab },
             set: { newValue in
                 if newValue == .capture {
-                    showCamera = true
+                    guard !isAddControlSuppressed else { return }
+                    toggleAddMenu()
                     selectedTab = lastContentTab
                 } else {
+                    showAddMenu = false
                     selectedTab = newValue
                     lastContentTab = newValue
                 }
@@ -167,18 +235,142 @@ private struct SystemRootTabsView: View {
         }
         .toolbar(session.isShowingDetail ? .hidden : .visible, for: .tabBar)
         .volioStableSystemTabBar()
+        .overlay(alignment: .bottomTrailing) {
+            if !session.isShowingDetail {
+                AddTabTouchShield(onAdd: toggleAddMenu)
+                    .padding(.trailing, 0)
+                    .padding(.bottom, 0)
+                    .allowsHitTesting(!isAddControlSuppressed)
+                    .zIndex(45)
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if showAddMenu, !session.isShowingDetail, !isAddControlSuppressed {
+                AddWorkMenu(
+                    onTakePhoto: {
+                        withAnimation(.spring(response: 0.24, dampingFraction: 0.9)) {
+                            showAddMenu = false
+                        }
+                        showCamera = true
+                    },
+                    onChoosePhoto: {
+                        withAnimation(.spring(response: 0.24, dampingFraction: 0.9)) {
+                            showAddMenu = false
+                        }
+                        showPhotoPicker = true
+                    }
+                )
+                .padding(.trailing, 18)
+                .padding(.bottom, 82)
+                .transition(.scale(scale: 0.9, anchor: .bottomTrailing).combined(with: .opacity))
+                .zIndex(60)
+            }
+        }
+        .animation(.spring(response: 0.28, dampingFraction: 0.84), value: showAddMenu)
     }
 
     @TabContentBuilder<MainTab>
     private var cameraTab: some TabContent<MainTab> {
         if #available(iOS 27.0, *) {
-            Tab(MainTab.capture.title, systemImage: MainTab.capture.icon, value: MainTab.capture, role: .prominent) {
+            Tab("Add", systemImage: MainTab.capture.icon, value: MainTab.capture, role: .prominent) {
                 Color.clear
             }
         } else {
-            Tab(MainTab.capture.title, systemImage: MainTab.capture.icon, value: MainTab.capture, role: .search) {
+            Tab("Add", systemImage: MainTab.capture.icon, value: MainTab.capture, role: .search) {
                 Color.clear
             }
+        }
+    }
+
+    private func toggleAddMenu() {
+        guard !isAddControlSuppressed else { return }
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+            showAddMenu.toggle()
+        }
+        if showAddMenu {
+            prewarmCameraAccess()
+        }
+    }
+
+    private func prewarmCameraAccess() {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .video) { _ in }
+        default:
+            break
+        }
+    }
+}
+
+private struct AddTabTouchShield: View {
+    var onAdd: () -> Void
+
+    var body: some View {
+        Button(action: onAdd) {
+            Color.clear
+                .frame(width: 112, height: 104)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Add work")
+    }
+}
+
+private struct AddWorkMenu: View {
+    var onTakePhoto: () -> Void
+    var onChoosePhoto: () -> Void
+
+    var body: some View {
+        VStack(spacing: 6) {
+            AddWorkMenuRow(icon: "camera.fill", title: "Take Photo", action: onTakePhoto)
+            Divider()
+                .padding(.leading, 44)
+            AddWorkMenuRow(icon: "photo.on.rectangle", title: "Choose Photo", action: onChoosePhoto)
+        }
+        .padding(.vertical, 8)
+        .frame(width: 214)
+        .modifier(AddWorkMenuChrome())
+    }
+}
+
+private struct AddWorkMenuRow: View {
+    var icon: String
+    var title: String
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 18, weight: .semibold))
+                    .frame(width: 24)
+                Text(title)
+                    .font(.system(size: 17, weight: .semibold))
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(VolioTheme.ink)
+            .contentShape(Rectangle())
+            .padding(.horizontal, 16)
+            .padding(.vertical, 11)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct AddWorkMenuChrome: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content
+                .glassEffect(.regular.tint(Color.white.opacity(0.5)).interactive(), in: .rect(cornerRadius: 28))
+                .shadow(color: VolioTheme.ink.opacity(0.16), radius: 18, y: 10)
+        } else {
+            content
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 28)
+                        .stroke(Color.white.opacity(0.55), lineWidth: 1)
+                }
+                .shadow(color: VolioTheme.ink.opacity(0.16), radius: 18, y: 10)
         }
     }
 }
@@ -186,7 +378,11 @@ private struct SystemRootTabsView: View {
 private struct LegacyRootTabsView: View {
     @Environment(VolioSession.self) private var session
     @Binding var selectedTab: MainTab
-    var onCapture: () -> Void
+    @Binding var showAddMenu: Bool
+    @Binding var isAddControlSuppressed: Bool
+    @Binding var showCamera: Bool
+    @Binding var showPhotoPicker: Bool
+    var onAdd: () -> Void
 
     var body: some View {
         ZStack {
@@ -206,11 +402,32 @@ private struct LegacyRootTabsView: View {
         }
         .overlay(alignment: .bottom) {
             if !session.isShowingDetail {
-                FloatingBottomControls(selectedTab: $selectedTab) {
-                    onCapture()
-                }
-                .transition(.scale(scale: 0.9).combined(with: .opacity))
-                .zIndex(20)
+                FloatingBottomControls(selectedTab: $selectedTab, showAddMenu: showAddMenu, onAdd: onAdd)
+                    .allowsHitTesting(!isAddControlSuppressed)
+                    .transition(.scale(scale: 0.9).combined(with: .opacity))
+                    .zIndex(20)
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if showAddMenu, !session.isShowingDetail, !isAddControlSuppressed {
+                AddWorkMenu(
+                    onTakePhoto: {
+                        withAnimation(.spring(response: 0.24, dampingFraction: 0.9)) {
+                            showAddMenu = false
+                        }
+                        showCamera = true
+                    },
+                    onChoosePhoto: {
+                        withAnimation(.spring(response: 0.24, dampingFraction: 0.9)) {
+                            showAddMenu = false
+                        }
+                        showPhotoPicker = true
+                    }
+                )
+                .padding(.trailing, 18)
+                .padding(.bottom, 82)
+                .transition(.scale(scale: 0.9, anchor: .bottomTrailing).combined(with: .opacity))
+                .zIndex(60)
             }
         }
     }
@@ -313,21 +530,24 @@ private struct NativeTabCluster: UIViewRepresentable {
 }
 
 private struct FloatingCaptureButton: View {
-    var onCapture: () -> Void
+    var isOpen: Bool
+    var onAdd: () -> Void
     private let buttonSize: CGFloat = 68
 
     var body: some View {
         ZStack {
-            Button(action: onCapture) {
-                Image(systemName: "camera.fill")
+            Button(action: onAdd) {
+                Image(systemName: "plus")
                     .font(.system(size: 25, weight: .bold))
                     .frame(width: buttonSize, height: buttonSize)
+                    .rotationEffect(.degrees(isOpen ? 45 : 0))
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Capture")
+            .accessibilityLabel(isOpen ? "Close add menu" : "Add work")
             .modifier(CaptureButtonChrome())
         }
         .frame(width: buttonSize, height: buttonSize, alignment: .center)
+        .animation(.spring(response: 0.28, dampingFraction: 0.82), value: isOpen)
     }
 }
 
@@ -351,7 +571,8 @@ private struct CaptureButtonChrome: ViewModifier {
 
 private struct FloatingBottomControls: View {
     @Binding var selectedTab: MainTab
-    var onCapture: () -> Void
+    var showAddMenu: Bool
+    var onAdd: () -> Void
 
     private let horizontalInset: CGFloat = 20
     private let controlHeight: CGFloat = 92
@@ -372,9 +593,7 @@ private struct FloatingBottomControls: View {
                 .frame(width: tabFrameWidth, height: controlHeight)
                 .position(x: tabCenterX, y: centerY)
 
-            FloatingCaptureButton {
-                onCapture()
-            }
+            FloatingCaptureButton(isOpen: showAddMenu, onAdd: onAdd)
             .frame(width: cameraSize, height: cameraSize)
             .position(x: cameraCenterX, y: centerY)
         }

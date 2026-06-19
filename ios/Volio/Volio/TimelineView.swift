@@ -48,12 +48,16 @@ private struct AppStoreHeaderMotion: ViewModifier {
 
 struct GalleryView: View {
     @Environment(VolioSession.self) private var session
+    @Environment(\.dismissVolioTransientOverlays) private var dismissTransientOverlays
+    @Environment(\.setVolioAddControlSuppressed) private var setAddControlSuppressed
     @State private var showSettings = false
     @State private var selectedIds = Set<String>()
     @State private var isSelecting = false
+    @State private var showDeleteConfirmation = false
+    @State private var navigationPath = NavigationPath()
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $navigationPath) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     VolioPageHeader(title: "Gallery") {
@@ -63,16 +67,25 @@ struct GalleryView: View {
                     if session.works.isEmpty {
                         emptyState
                     } else {
-                        MasonryGrid(works: session.works, isSelecting: isSelecting, selectedIds: selectedIds) { work in
-                            toggleSelection(work)
-                        }
+                        MasonryGrid(
+                            works: session.works,
+                            isSelecting: isSelecting,
+                            selectedIds: selectedIds,
+                            onOpenWork: openWork,
+                            onToggleSelection: toggleSelection,
+                            onStartSelection: startSelection
+                        )
                     }
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 10)
-                .padding(.bottom, isSelecting && !selectedIds.isEmpty ? 132 : 96)
+                .padding(.bottom, isSelecting ? 132 : 96)
             }
             .background(VolioTheme.paper.ignoresSafeArea())
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { _ in dismissTransientOverlays() }
+            )
             .toolbar(.hidden, for: .navigationBar)
             .refreshable {
                 await session.refreshLibrary(showError: true)
@@ -84,9 +97,22 @@ struct GalleryView: View {
                 ArtworkDetailView(work: work)
             }
             .overlay(alignment: .bottom) {
-                if isSelecting && !selectedIds.isEmpty {
+                if isSelecting {
                     selectionBar
                 }
+            }
+            .volioDeleteConfirmation(
+                isPresented: $showDeleteConfirmation,
+                count: selectedIds.count,
+                action: deleteSelected
+            )
+            .onDisappear {
+                clearSelection()
+                dismissTransientOverlays()
+                setAddControlSuppressed(false)
+            }
+            .onChange(of: isSelecting) { _, newValue in
+                setAddControlSuppressed(newValue)
             }
         }
     }
@@ -94,12 +120,13 @@ struct GalleryView: View {
     private var headerActions: some View {
         HStack(spacing: 8) {
             Button {
+                dismissTransientOverlays()
                 showSettings = true
             } label: {
                 Image(systemName: "person.crop.circle.fill")
-                    .font(.title3)
-                    .frame(width: 38, height: 38)
-                    .volioGlass(cornerRadius: 19, interactive: true)
+                    .font(.system(size: 28, weight: .semibold))
+                    .frame(width: 52, height: 52)
+                    .volioGlass(cornerRadius: 26, interactive: true)
             }
             .buttonStyle(.plain)
         }
@@ -140,8 +167,17 @@ struct GalleryView: View {
 
     private var selectionBar: some View {
         HStack(spacing: 14) {
-            Button(role: .destructive) {
-                deleteSelected()
+            Button {
+                clearSelection()
+            } label: {
+                Text("Done")
+                    .frame(width: 82)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+
+            Button {
+                showDeleteConfirmation = true
             } label: {
                 Label("Delete \(selectedIds.count)", systemImage: "trash")
                     .frame(maxWidth: .infinity)
@@ -149,17 +185,39 @@ struct GalleryView: View {
             .buttonStyle(.borderedProminent)
             .tint(.red)
             .controlSize(.large)
+            .disabled(selectedIds.isEmpty)
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
         .background(.ultraThinMaterial)
     }
 
+    private func startSelection(_ work: LocalWork) {
+        guard !isSelecting else { return }
+        dismissTransientOverlays()
+        setAddControlSuppressed(true)
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        withTransaction(Transaction(animation: nil)) {
+            isSelecting = true
+            selectedIds.insert(work.id)
+        }
+    }
+
+    private func openWork(_ work: LocalWork) {
+        clearSelection()
+        dismissTransientOverlays()
+        navigationPath.append(work)
+    }
+
     private func toggleSelection(_ work: LocalWork) {
         if selectedIds.contains(work.id) {
-            selectedIds.remove(work.id)
+            withTransaction(Transaction(animation: nil)) {
+                selectedIds.remove(work.id)
+            }
         } else {
-            selectedIds.insert(work.id)
+            withTransaction(Transaction(animation: nil)) {
+                selectedIds.insert(work.id)
+            }
         }
     }
 
@@ -169,14 +227,28 @@ struct GalleryView: View {
                 session.deleteWork(work)
             }
         }
-        selectedIds.removeAll()
-        isSelecting = false
+        clearSelection()
+    }
+
+    private func clearSelection() {
+        withTransaction(Transaction(animation: nil)) {
+            selectedIds.removeAll()
+            isSelecting = false
+            showDeleteConfirmation = false
+        }
+        setAddControlSuppressed(false)
     }
 }
 
 struct TimelineView: View {
     @Environment(VolioSession.self) private var session
+    @Environment(\.dismissVolioTransientOverlays) private var dismissTransientOverlays
+    @Environment(\.setVolioAddControlSuppressed) private var setAddControlSuppressed
     @State private var showSettings = false
+    @State private var selectedIds = Set<String>()
+    @State private var isSelecting = false
+    @State private var showDeleteConfirmation = false
+    @State private var navigationPath = NavigationPath()
 
     private var groups: [(title: String, subtitle: String, works: [LocalWork])] {
         let grouped = Dictionary(grouping: session.works) { work in
@@ -193,7 +265,7 @@ struct TimelineView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $navigationPath) {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 22) {
                     VolioPageHeader(title: "Timeline") {
@@ -207,14 +279,27 @@ struct TimelineView: View {
                             .padding(.top, 120)
                     } else {
                         ForEach(groups, id: \.title) { group in
-                            TimelineAgeSection(title: group.title, subtitle: group.subtitle, works: group.works)
+                            TimelineAgeSection(
+                                title: group.title,
+                                subtitle: group.subtitle,
+                                works: group.works,
+                                isSelecting: isSelecting,
+                                selectedIds: selectedIds,
+                                onOpenWork: openWork,
+                                onToggleSelection: toggleSelection,
+                                onStartSelection: startSelection
+                            )
                         }
                     }
                 }
                 .padding(.top, 10)
-                .padding(.bottom, 96)
+                .padding(.bottom, isSelecting ? 132 : 96)
             }
             .background(VolioTheme.paper.ignoresSafeArea())
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { _ in dismissTransientOverlays() }
+            )
             .toolbar(.hidden, for: .navigationBar)
             .refreshable {
                 await session.refreshLibrary(showError: true)
@@ -225,21 +310,114 @@ struct TimelineView: View {
             .navigationDestination(for: LocalWork.self) { work in
                 ArtworkDetailView(work: work)
             }
+            .overlay(alignment: .bottom) {
+                if isSelecting {
+                    selectionBar
+                }
+            }
+            .volioDeleteConfirmation(
+                isPresented: $showDeleteConfirmation,
+                count: selectedIds.count,
+                action: deleteSelected
+            )
+            .onDisappear {
+                clearSelection()
+                dismissTransientOverlays()
+                setAddControlSuppressed(false)
+            }
+            .onChange(of: isSelecting) { _, newValue in
+                setAddControlSuppressed(newValue)
+            }
         }
     }
 
     private var headerActions: some View {
         HStack(spacing: 8) {
             Button {
+                dismissTransientOverlays()
                 showSettings = true
             } label: {
                 Image(systemName: "person.crop.circle.fill")
-                    .font(.title3)
-                    .frame(width: 38, height: 38)
-                    .volioGlass(cornerRadius: 19, interactive: true)
+                    .font(.system(size: 28, weight: .semibold))
+                    .frame(width: 52, height: 52)
+                    .volioGlass(cornerRadius: 26, interactive: true)
             }
             .buttonStyle(.plain)
         }
+    }
+
+    private var selectionBar: some View {
+        HStack(spacing: 14) {
+            Button {
+                clearSelection()
+            } label: {
+                Text("Done")
+                    .frame(width: 82)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+
+            Button {
+                showDeleteConfirmation = true
+            } label: {
+                Label("Delete \(selectedIds.count)", systemImage: "trash")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
+            .controlSize(.large)
+            .disabled(selectedIds.isEmpty)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+        .background(.ultraThinMaterial)
+    }
+
+    private func startSelection(_ work: LocalWork) {
+        guard !isSelecting else { return }
+        dismissTransientOverlays()
+        setAddControlSuppressed(true)
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        withTransaction(Transaction(animation: nil)) {
+            isSelecting = true
+            selectedIds.insert(work.id)
+        }
+    }
+
+    private func openWork(_ work: LocalWork) {
+        clearSelection()
+        dismissTransientOverlays()
+        navigationPath.append(work)
+    }
+
+    private func toggleSelection(_ work: LocalWork) {
+        if selectedIds.contains(work.id) {
+            withTransaction(Transaction(animation: nil)) {
+                selectedIds.remove(work.id)
+            }
+        } else {
+            withTransaction(Transaction(animation: nil)) {
+                selectedIds.insert(work.id)
+            }
+        }
+    }
+
+    private func deleteSelected() {
+        for id in selectedIds {
+            if let work = session.works.first(where: { $0.id == id }) {
+                session.deleteWork(work)
+            }
+        }
+        clearSelection()
+    }
+
+    private func clearSelection() {
+        withTransaction(Transaction(animation: nil)) {
+            selectedIds.removeAll()
+            isSelecting = false
+            showDeleteConfirmation = false
+        }
+        setAddControlSuppressed(false)
     }
 
     private func groupSortValue(_ title: String, works: [LocalWork]) -> TimeInterval {
@@ -257,7 +435,9 @@ struct MasonryGrid: View {
     var works: [LocalWork]
     var isSelecting = false
     var selectedIds = Set<String>()
+    var onOpenWork: (LocalWork) -> Void = { _ in }
     var onToggleSelection: (LocalWork) -> Void = { _ in }
+    var onStartSelection: (LocalWork) -> Void = { _ in }
 
     private var sortedWorks: [LocalWork] {
         works.sorted { $0.capturedAt > $1.capturedAt }
@@ -278,10 +458,20 @@ struct MasonryGrid: View {
                         .contentShape(RoundedRectangle(cornerRadius: 12))
                         .onTapGesture { onToggleSelection(work) }
                 } else {
-                    NavigationLink(value: work) {
-                        MasonryTile(work: work)
-                    }
-                    .buttonStyle(.plain)
+                    MasonryTile(work: work)
+                        .contentShape(RoundedRectangle(cornerRadius: 12))
+                        .gesture(
+                            LongPressGesture(minimumDuration: 0.42)
+                                .exclusively(before: TapGesture())
+                                .onEnded { value in
+                                    switch value {
+                                    case .first(_):
+                                        onStartSelection(work)
+                                    case .second(_):
+                                        onOpenWork(work)
+                                    }
+                                }
+                        )
                 }
             }
         }
@@ -437,8 +627,10 @@ private struct RowMasonryLayout: Layout {
 
 struct SearchView: View {
     @Environment(VolioSession.self) private var session
+    @Environment(\.dismissVolioTransientOverlays) private var dismissTransientOverlays
     @State private var query = ""
     @State private var semanticEnabled = true
+    @FocusState private var searchFocused: Bool
 
     private var normalizedQuery: String {
         query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -492,9 +684,20 @@ struct SearchView: View {
                 .padding(.bottom, 96)
             }
             .background(VolioTheme.paper.ignoresSafeArea())
+            .scrollDismissesKeyboard(.interactively)
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { _ in
+                        dismissTransientOverlays()
+                        searchFocused = false
+                    }
+            )
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: LocalWork.self) { work in
                 ArtworkDetailView(work: work)
+            }
+            .onDisappear {
+                dismissSearchChrome()
             }
         }
     }
@@ -506,6 +709,12 @@ struct SearchView: View {
             TextField("Search whale, watercolor, Age 6...", text: $query)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+                .focused($searchFocused)
+                .onChange(of: searchFocused) { _, isFocused in
+                    if isFocused {
+                        dismissTransientOverlays()
+                    }
+                }
             if !query.isEmpty {
                 Button {
                     query = ""
@@ -544,6 +753,10 @@ struct SearchView: View {
             RoundedRectangle(cornerRadius: 20)
                 .stroke(Color.white.opacity(0.65), lineWidth: 1)
         }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            dismissSearchChrome()
+        }
     }
 
     private var recommendationSection: some View {
@@ -563,6 +776,7 @@ struct SearchView: View {
                     ForEach(suggestions, id: \.self) { suggestion in
                         Button {
                             query = suggestion
+                            dismissSearchChrome()
                         } label: {
                             Text(suggestion)
                                 .font(.subheadline.weight(.semibold))
@@ -575,6 +789,10 @@ struct SearchView: View {
                     }
                 }
             }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            dismissSearchChrome()
         }
     }
 
@@ -611,11 +829,16 @@ struct SearchView: View {
                 }
             }
         }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            dismissSearchChrome()
+        }
     }
 
     private func quickQuery(_ value: String) -> some View {
         Button {
             query = value
+            dismissSearchChrome()
         } label: {
             HStack {
                 Image(systemName: "magnifyingglass")
@@ -641,6 +864,11 @@ struct SearchView: View {
         if lower.contains("favorite") { tokens.append("true") }
         if lower.contains("physical") { tokens.append("kept") }
         return tokens
+    }
+
+    private func dismissSearchChrome() {
+        searchFocused = false
+        dismissTransientOverlays()
     }
 }
 
@@ -696,6 +924,11 @@ private struct TimelineAgeSection: View {
     var title: String
     var subtitle: String
     var works: [LocalWork]
+    var isSelecting = false
+    var selectedIds = Set<String>()
+    var onOpenWork: (LocalWork) -> Void = { _ in }
+    var onToggleSelection: (LocalWork) -> Void = { _ in }
+    var onStartSelection: (LocalWork) -> Void = { _ in }
 
     private let columns = [GridItem(.adaptive(minimum: 86), spacing: 8)]
 
@@ -734,10 +967,33 @@ private struct TimelineAgeSection: View {
 
                 LazyVGrid(columns: columns, spacing: 8) {
                     ForEach(works) { work in
-                        NavigationLink(value: work) {
+                        if isSelecting {
                             TimelineTile(work: work)
+                                .overlay(alignment: .topTrailing) {
+                                    Image(systemName: selectedIds.contains(work.id) ? "checkmark.circle.fill" : "circle")
+                                        .font(.title3)
+                                        .foregroundStyle(selectedIds.contains(work.id) ? VolioTheme.accent : .white.opacity(0.84))
+                                        .shadow(radius: 1)
+                                        .padding(5)
+                                }
+                                .contentShape(RoundedRectangle(cornerRadius: 12))
+                                .onTapGesture { onToggleSelection(work) }
+                        } else {
+                            TimelineTile(work: work)
+                                .contentShape(RoundedRectangle(cornerRadius: 12))
+                                .gesture(
+                                    LongPressGesture(minimumDuration: 0.42)
+                                        .exclusively(before: TapGesture())
+                                        .onEnded { value in
+                                            switch value {
+                                            case .first(_):
+                                                onStartSelection(work)
+                                            case .second(_):
+                                                onOpenWork(work)
+                                            }
+                                        }
+                                )
                         }
-                        .buttonStyle(.plain)
                     }
                 }
             }

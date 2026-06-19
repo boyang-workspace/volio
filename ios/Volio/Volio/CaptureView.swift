@@ -36,12 +36,6 @@ struct CaptureView: View {
             StackCameraView(
                 onCapture: { data in
                     saveImmediately(data, workType: activeWorkType)
-                },
-                onImportPhotos: {
-                    showCamera = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                        showPhotoPicker = true
-                    }
                 }
             )
         }
@@ -70,7 +64,7 @@ struct CaptureView: View {
                 .font(.system(size: 28, weight: .black, design: .rounded))
                 .foregroundStyle(VolioTheme.ink)
 
-            Text(isImportingPhotos ? "Importing photos..." : "Use the Capture tab to open camera. Import Photos lives inside the camera.")
+            Text(isImportingPhotos ? "Importing photos..." : "Use Add to take a photo or choose photos.")
                 .font(.subheadline)
                 .foregroundStyle(VolioTheme.mutedInk)
                 .multilineTextAlignment(.center)

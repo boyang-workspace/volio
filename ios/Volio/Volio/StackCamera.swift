@@ -4,13 +4,11 @@ import UIKit
 
 struct StackCameraView: UIViewControllerRepresentable {
     var onCapture: (Data) -> Void
-    var onImportPhotos: () -> Void = {}
     @Environment(\.dismiss) private var dismiss
 
     func makeUIViewController(context: Context) -> StackCameraViewController {
         let controller = StackCameraViewController()
         controller.onCapture = onCapture
-        controller.onImportPhotos = onImportPhotos
         controller.onClose = { dismiss() }
         return controller
     }
@@ -20,7 +18,6 @@ struct StackCameraView: UIViewControllerRepresentable {
 
 final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDelegate {
     var onCapture: ((Data) -> Void)?
-    var onImportPhotos: (() -> Void)?
     var onClose: (() -> Void)?
 
     private let captureSession = AVCaptureSession()
@@ -37,6 +34,12 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
     private var isCapturing = false
     private var pendingCapture = false
     private var flashOn = false
+
+    // Guide frame + focus controls
+    private var currentDevice: AVCaptureDevice?
+    private let guideView = UIView()
+    private var focusIndicator: UIView?
+    private var isAEAFLocked = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -57,6 +60,8 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
         super.viewDidLayoutSubviews()
         layoutPreviewContainer()
         previewLayer?.frame = previewContainer.bounds
+        guideView.frame = previewContainer.frame
+        setupGuideCorners()
     }
 
     private func configureCamera() {
@@ -83,6 +88,7 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
             self.captureSession.addOutput(self.photoOutput)
             self.photoOutput.maxPhotoQualityPrioritization = .speed
             self.captureSession.commitConfiguration()
+            self.currentDevice = device
 
             let preview = AVCaptureVideoPreviewLayer(session: self.captureSession)
             preview.videoGravity = .resizeAspectFill
@@ -109,6 +115,11 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
         previewContainer.clipsToBounds = true
         previewContainer.translatesAutoresizingMaskIntoConstraints = true
         view.addSubview(previewContainer)
+
+        // Guide frame
+        guideView.isUserInteractionEnabled = false
+        guideView.backgroundColor = .clear
+        view.addSubview(guideView)
 
         let doneButton = UIButton(type: .system)
         var doneConfig = UIButton.Configuration.filled()
@@ -142,18 +153,6 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
         flashButton.configuration = flashConfig
         flashButton.addTarget(self, action: #selector(toggleFlash), for: .touchUpInside)
 
-        let importButton = UIButton(type: .system)
-        var importConfig = UIButton.Configuration.filled()
-        importConfig.title = "Photos"
-        importConfig.image = UIImage(systemName: "photo.on.rectangle")
-        importConfig.imagePadding = 6
-        importConfig.baseForegroundColor = .white
-        importConfig.baseBackgroundColor = UIColor.black.withAlphaComponent(0.38)
-        importConfig.cornerStyle = .capsule
-        importConfig.contentInsets = NSDirectionalEdgeInsets(top: 9, leading: 12, bottom: 9, trailing: 14)
-        importButton.configuration = importConfig
-        importButton.addTarget(self, action: #selector(importPhotos), for: .touchUpInside)
-
         previewSlot.backgroundColor = UIColor.black.withAlphaComponent(0.32)
         previewSlot.layer.cornerRadius = 12
         previewSlot.layer.borderWidth = 1
@@ -175,7 +174,7 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
         countBadge.alpha = 0
         countBadge.translatesAutoresizingMaskIntoConstraints = false
 
-        [doneButton, shutter, flashButton, previewSlot, importButton].forEach {
+        [doneButton, shutter, flashButton, previewSlot].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview($0)
         }
@@ -204,9 +203,6 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
             previewSlot.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 22),
             previewSlot.centerYAnchor.constraint(equalTo: shutter.centerYAnchor),
 
-            importButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -18),
-            importButton.centerYAnchor.constraint(equalTo: shutter.centerYAnchor),
-
             previewSlot.widthAnchor.constraint(equalToConstant: 52),
             previewSlot.heightAnchor.constraint(equalToConstant: 52),
             previewImageView.leadingAnchor.constraint(equalTo: previewSlot.leadingAnchor),
@@ -220,6 +216,12 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
         ])
 
         view.setNeedsLayout()
+
+        let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handlePreviewTap(_:)))
+        let longPressGesture = UILongPressGestureRecognizer(target: self, action: #selector(handlePreviewLongPress(_:)))
+        longPressGesture.minimumPressDuration = 0.5
+        previewContainer.addGestureRecognizer(tapGesture)
+        previewContainer.addGestureRecognizer(longPressGesture)
     }
 
     private func showCameraUnavailable() {
@@ -229,6 +231,154 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
     private func setShutterEnabled(_ enabled: Bool) {
         shutter.isEnabled = enabled
         shutter.alpha = enabled ? 1 : 0.45
+    }
+
+    // MARK: - Guide frame
+
+    private func setupGuideCorners() {
+        guideView.layer.sublayers?.forEach { $0.removeFromSuperlayer() }
+        guard guideView.bounds.width > 0, guideView.bounds.height > 0 else { return }
+
+        let shapeLayer = CAShapeLayer()
+        shapeLayer.strokeColor = UIColor.white.withAlphaComponent(0.65).cgColor
+        shapeLayer.fillColor = UIColor.clear.cgColor
+        shapeLayer.lineWidth = 2.5
+        shapeLayer.lineCap = .round
+
+        let inset: CGFloat = guideView.bounds.width * 0.08
+        let cornerLength: CGFloat = 28
+        let rect = guideView.bounds.insetBy(dx: inset, dy: inset)
+
+        let path = UIBezierPath()
+        // Top-left
+        path.move(to: CGPoint(x: rect.minX, y: rect.minY + cornerLength))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.minX + cornerLength, y: rect.minY))
+        // Top-right
+        path.move(to: CGPoint(x: rect.maxX - cornerLength, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY + cornerLength))
+        // Bottom-right
+        path.move(to: CGPoint(x: rect.maxX, y: rect.maxY - cornerLength))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.maxX - cornerLength, y: rect.maxY))
+        // Bottom-left
+        path.move(to: CGPoint(x: rect.minX + cornerLength, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY - cornerLength))
+
+        shapeLayer.path = path.cgPath
+        guideView.layer.addSublayer(shapeLayer)
+    }
+
+    // MARK: - Tap to focus / expose
+
+    @objc private func handlePreviewTap(_ gesture: UITapGestureRecognizer) {
+        guard !isAEAFLocked else { return }
+        let point = gesture.location(in: previewContainer)
+        guard let previewLayer, let device = currentDevice else { return }
+        let devicePoint = previewLayer.captureDevicePointConverted(fromLayerPoint: point)
+
+        do {
+            try device.lockForConfiguration()
+            if device.isFocusPointOfInterestSupported {
+                device.focusPointOfInterest = devicePoint
+                device.focusMode = .autoFocus
+            }
+            if device.isExposurePointOfInterestSupported {
+                device.exposurePointOfInterest = devicePoint
+                device.exposureMode = .autoExpose
+            }
+            device.unlockForConfiguration()
+        } catch {}
+
+        showFocusIndicator(at: point, locked: false)
+    }
+
+    @objc private func handlePreviewLongPress(_ gesture: UILongPressGestureRecognizer) {
+        guard gesture.state == .began else { return }
+        let point = gesture.location(in: previewContainer)
+        guard let previewLayer, let device = currentDevice else { return }
+        let devicePoint = previewLayer.captureDevicePointConverted(fromLayerPoint: point)
+
+        do {
+            try device.lockForConfiguration()
+            if isAEAFLocked {
+                if device.isFocusModeSupported(.continuousAutoFocus) {
+                    device.focusMode = .continuousAutoFocus
+                }
+                if device.isExposureModeSupported(.continuousAutoExposure) {
+                    device.exposureMode = .continuousAutoExposure
+                }
+                isAEAFLocked = false
+                removeFocusIndicator()
+            } else {
+                if device.isFocusPointOfInterestSupported {
+                    device.focusPointOfInterest = devicePoint
+                }
+                if device.isFocusModeSupported(.locked) {
+                    device.focusMode = .locked
+                }
+                if device.isExposurePointOfInterestSupported {
+                    device.exposurePointOfInterest = devicePoint
+                }
+                if device.isExposureModeSupported(.locked) {
+                    device.exposureMode = .locked
+                }
+                isAEAFLocked = true
+                showFocusIndicator(at: point, locked: true)
+            }
+            device.unlockForConfiguration()
+        } catch {}
+    }
+
+    private func showFocusIndicator(at point: CGPoint, locked: Bool) {
+        removeFocusIndicator()
+        let size: CGFloat = 72
+        let indicator = UIView(frame: CGRect(x: point.x - size / 2, y: point.y - size / 2, width: size, height: size))
+        indicator.layer.borderColor = UIColor.systemYellow.cgColor
+        indicator.layer.borderWidth = 2
+        indicator.layer.cornerRadius = 4
+        indicator.backgroundColor = .clear
+
+        if locked {
+            let label = UILabel(frame: indicator.bounds.insetBy(dx: 2, dy: 2))
+            label.text = "LOCKED"
+            label.textColor = UIColor.systemYellow
+            label.font = UIFont.boldSystemFont(ofSize: 8)
+            label.textAlignment = .center
+            label.numberOfLines = 2
+            label.adjustsFontSizeToFitWidth = true
+            indicator.addSubview(label)
+            indicator.transform = CGAffineTransform(scaleX: 0.6, y: 0.6)
+            previewContainer.addSubview(indicator)
+            UIView.animate(withDuration: 0.2) {
+                indicator.transform = .identity
+            }
+        } else {
+            indicator.alpha = 0
+            indicator.transform = CGAffineTransform(scaleX: 1.4, y: 1.4)
+            previewContainer.addSubview(indicator)
+            UIView.animate(withDuration: 0.15) {
+                indicator.alpha = 1
+                indicator.transform = .identity
+            } completion: { _ in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    UIView.animate(withDuration: 0.2) {
+                        indicator.alpha = 0
+                    } completion: { _ in
+                        indicator.removeFromSuperview()
+                        if self.focusIndicator === indicator { self.focusIndicator = nil }
+                    }
+                }
+            }
+        }
+        focusIndicator = indicator
+    }
+
+    private func removeFocusIndicator() {
+        focusIndicator?.removeFromSuperview()
+        focusIndicator = nil
     }
 
     @objc private func capture() {
@@ -271,10 +421,6 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
         device.unlockForConfiguration()
     }
 
-    @objc private func importPhotos() {
-        onImportPhotos?()
-    }
-
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
         guard error == nil, let data = photo.fileDataRepresentation() else {
             Task { @MainActor in
@@ -283,28 +429,21 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
             return
         }
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self, data] in
-            let prepared = Self.preparePhoto(data)
-            DispatchQueue.main.async {
-                self?.completeCapture(jpeg: prepared.jpeg, preview: prepared.image)
-            }
+        let preview = Self.generatePreview(from: data)
+        DispatchQueue.main.async {
+            self.completeCapture(jpeg: data, preview: preview)
         }
     }
 
-    private static func preparePhoto(_ data: Data) -> (jpeg: Data, image: UIImage?) {
-        guard let uiImage = UIImage(data: data) else {
-            return (data, nil)
-        }
-        let normalized = normalize(uiImage)
-        return (normalized.jpegData(compressionQuality: 0.92) ?? data, normalized)
-    }
-
-    private static func normalize(_ image: UIImage) -> UIImage {
-        guard image.imageOrientation != .up else { return image }
-        let renderer = UIGraphicsImageRenderer(size: image.size)
-        return renderer.image { _ in
-            image.draw(in: CGRect(origin: .zero, size: image.size))
-        }
+    private static func generatePreview(from data: Data) -> UIImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: 120,
+            kCGImageSourceCreateThumbnailWithTransform: true
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        return UIImage(cgImage: cgImage)
     }
 
     @MainActor

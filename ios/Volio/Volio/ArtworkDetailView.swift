@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ArtworkDetailView: View {
     @Environment(VolioSession.self) private var session
+    @Environment(\.dismiss) private var dismiss
     @State var work: LocalWork
     @State private var showEditor = false
     @State private var showShareCard = false
@@ -52,16 +53,6 @@ struct ArtworkDetailView: View {
                 // Actions
                 HStack(spacing: 14) {
                     Button {
-                        session.toggleFavorite(work)
-                    } label: {
-                        Label(work.isFavorite ? "Favorited" : "Favorite", systemImage: work.isFavorite ? "heart.fill" : "heart")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(work.isFavorite ? .red : nil)
-                    .controlSize(.large)
-
-                    Button {
                         showShareCard = true
                     } label: {
                         Label("Share Card", systemImage: "square.and.arrow.up")
@@ -94,9 +85,16 @@ struct ArtworkDetailView: View {
         }
         .toolbar(.hidden, for: .tabBar)
         .sheet(isPresented: $showEditor) {
-            ArtworkEditorView(work: work) { updated in
+            ArtworkEditorView(
+                work: work,
+                onSave: { updated in
                 work = updated
-            }
+                },
+                onDelete: {
+                    session.deleteWork(work)
+                    dismiss()
+                }
+            )
         }
         .sheet(isPresented: $showShareCard) {
             ShareCardView(work: work)
@@ -188,7 +186,6 @@ struct ArtworkDetailView: View {
                     DetailInfoRow(label: "File", value: fileName)
                     DetailInfoRow(label: "Created", value: formattedServerDate(artwork.createdAt) ?? work.createdAt.formatted(date: .abbreviated, time: .shortened))
                     DetailInfoRow(label: "Updated", value: formattedServerDate(artwork.updatedAt) ?? work.localUpdatedAt?.formatted(date: .abbreviated, time: .shortened))
-                    DetailInfoRow(label: "Favorite", value: (artwork.isFavorite?.boolValue ?? work.isFavorite) ? "Yes" : "No")
                     DetailInfoRow(label: "Representative", value: (artwork.isRepresentative?.boolValue ?? work.isRepresentative) ? "Yes" : "No")
                 }
             }
@@ -421,11 +418,14 @@ struct ArtworkEditorView: View {
     @State private var title: String
     @State private var note: String
     @State private var childQuote: String
+    @State private var showDeleteConfirmation = false
     var onSave: (LocalWork) -> Void
+    var onDelete: () -> Void
 
-    init(work: LocalWork, onSave: @escaping (LocalWork) -> Void) {
+    init(work: LocalWork, onSave: @escaping (LocalWork) -> Void, onDelete: @escaping () -> Void) {
         self.work = work
         self.onSave = onSave
+        self.onDelete = onDelete
         _title = State(initialValue: work.title ?? "")
         _note = State(initialValue: work.note ?? "")
         _childQuote = State(initialValue: work.childQuote ?? "")
@@ -449,6 +449,14 @@ struct ArtworkEditorView: View {
                 } header: {
                     Label("Story", systemImage: "text.quote")
                 }
+
+                Section {
+                    Button(role: .destructive) {
+                        showDeleteConfirmation = true
+                    } label: {
+                        Label("Delete Work", systemImage: "trash")
+                    }
+                }
             }
             .navigationTitle("Edit")
             .navigationBarTitleDisplayMode(.inline)
@@ -467,6 +475,36 @@ struct ArtworkEditorView: View {
                     }
                 }
             }
+            .volioDeleteConfirmation(isPresented: $showDeleteConfirmation, count: 1) {
+                onDelete()
+                dismiss()
+            }
         }
+    }
+}
+
+extension View {
+    func volioDeleteConfirmation(
+        isPresented: Binding<Bool>,
+        count: Int,
+        action: @escaping () -> Void
+    ) -> some View {
+        alert(deleteTitle(count: count), isPresented: isPresented) {
+            Button("Delete", role: .destructive, action: action)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(deleteMessage(count: count))
+        }
+    }
+
+    private func deleteTitle(count: Int) -> String {
+        count == 1 ? "Delete this work?" : "Delete \(count) works?"
+    }
+
+    private func deleteMessage(count: Int) -> String {
+        if count == 1 {
+            return "This removes the local work and asks Volio Desktop to delete its synced copy if one exists."
+        }
+        return "This removes the selected works and asks Volio Desktop to delete synced copies if they exist."
     }
 }

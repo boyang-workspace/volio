@@ -57,13 +57,19 @@ enum ImageStorage {
     }
 
     static func generateThumbnail(from data: Data, maxDimension: CGFloat = 600) -> Data {
-        guard let image = UIImage(data: data) else { return data }
-        let scale = min(maxDimension / image.size.width, maxDimension / image.size.height, 1.0)
-        let newSize = CGSize(width: image.size.width * scale, height: image.size.height * scale)
-        let renderer = UIGraphicsImageRenderer(size: newSize)
-        return renderer.jpegData(withCompressionQuality: 0.8) { _ in
-            image.draw(in: CGRect(origin: .zero, size: newSize))
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return data }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxDimension,
+            kCGImageSourceCreateThumbnailWithTransform: true
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
+              let uiImage = UIImage(cgImage: cgImage) as UIImage?,
+              let jpeg = uiImage.jpegData(compressionQuality: 0.8)
+        else {
+            return data
         }
+        return jpeg
     }
 
     static func processingDerivative(from data: Data, maxDimension: CGFloat = 1600) -> Data {
