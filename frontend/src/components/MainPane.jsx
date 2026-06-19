@@ -47,10 +47,32 @@ function EmptyState() {
   )
 }
 
+function toColumnMajor(arr, cols) {
+  const n = arr.length
+  const fullRows = Math.floor(n / cols)
+  const remainder = n % cols
+  const result = []
+  for (let col = 0; col < cols; col++) {
+    const rows = col < remainder ? fullRows + 1 : fullRows
+    for (let row = 0; row < rows; row++) {
+      result.push(arr[row * cols + col])
+    }
+  }
+  return result
+}
+
 function WorksMasonry({ list, selectedWorkId, onSelect }) {
+  const sorted = [...list].sort((a, b) => {
+    const da = a.artwork_date || a.captured_at || a.created_at || ''
+    const db = b.artwork_date || b.captured_at || b.created_at || ''
+    return da > db ? -1 : da < db ? 1 : 0
+  })
+
+  const cols = 4
+
   return (
     <div className="columns-4 gap-4">
-      {list.map((w) => (
+      {toColumnMajor(sorted, cols).map((w) => (
         <div key={w.id} className="break-inside-avoid mb-4">
           <WorkCard
             work={w}

@@ -27,7 +27,7 @@ function WorkCard({ work, isSelected, onSelect, square }) {
     >
       <div className={'overflow-hidden bg-[#f0f0f0] ' + (square ? 'size-full' : '')}>
         <img
-          className="block w-full h-full object-cover transition-transform duration-500 ease-out group-hover:scale-105"
+          className={'block w-full transition-transform duration-500 ease-out group-hover:scale-105 ' + (square ? 'h-full object-cover' : '')}
           src={path}
           alt={title}
           loading="lazy"
