@@ -38,13 +38,9 @@ actor ImageIngestService {
         let checksum = ImageStorage.stableDataChecksum(data)
 
         var thumbnailPath: String?
-        if let previewData, !previewData.isEmpty {
-            thumbnailPath = ImageStorage.saveThumbnail(id: workID, data: previewData)
-        } else {
-            let thumbData = ImageStorage.generateThumbnail(from: data, maxDimension: 600)
-            if !thumbData.isEmpty {
-                thumbnailPath = ImageStorage.saveThumbnail(id: workID, data: thumbData)
-            }
+        let thumbData = ImageStorage.generateThumbnail(from: data, maxDimension: 900)
+        if !thumbData.isEmpty {
+            thumbnailPath = ImageStorage.saveThumbnail(id: workID, data: thumbData)
         }
         VolioPerformance.end("capture_ingest")
         return IngestedImage(
@@ -100,7 +96,12 @@ final class ArtworkImagePipeline: NSObject {
         originalPath: String?,
         targetPixelSize: CGSize
     ) async -> ArtworkImageResult? {
-        let candidate = imageCandidate(workID: workID, thumbnailPath: thumbnailPath, originalPath: originalPath)
+        let candidate = imageCandidate(
+            workID: workID,
+            thumbnailPath: thumbnailPath,
+            originalPath: originalPath,
+            targetPixelSize: targetPixelSize
+        )
         guard let path = candidate.path else { return nil }
         let key = cacheKey(path: path, workID: workID, targetPixelSize: targetPixelSize)
         if let image = cache.object(forKey: key as NSString) {
@@ -126,13 +127,23 @@ final class ArtworkImagePipeline: NSObject {
         metadataCache.removeAllObjects()
     }
 
-    private func imageCandidate(workID: String?, thumbnailPath: String?, originalPath: String?) -> (path: String?, role: String) {
-        let candidates = [
+    private func imageCandidate(
+        workID: String?,
+        thumbnailPath: String?,
+        originalPath: String?,
+        targetPixelSize: CGSize
+    ) -> (path: String?, role: String) {
+        let thumbnailCandidates = [
             (workID.map(ImageStorage.thumbnailPath(for:)), "thumbnail"),
-            (thumbnailPath, "thumbnail"),
+            (thumbnailPath, "thumbnail")
+        ]
+        let originalCandidates = [
             (workID.map(ImageStorage.originalPath(for:)), "original"),
             (originalPath, "original")
         ]
+        let candidates = max(targetPixelSize.width, targetPixelSize.height) > 520
+            ? originalCandidates + thumbnailCandidates
+            : thumbnailCandidates + originalCandidates
         for candidate in candidates {
             if let path = candidate.0, FileManager.default.fileExists(atPath: path) {
                 return (path, candidate.1)

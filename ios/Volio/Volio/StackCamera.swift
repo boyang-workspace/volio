@@ -103,7 +103,7 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
             }
             self.captureSession.addInput(input)
             self.captureSession.addOutput(self.photoOutput)
-            self.photoOutput.maxPhotoQualityPrioritization = .speed
+            self.photoOutput.maxPhotoQualityPrioritization = .balanced
             self.captureSession.commitConfiguration()
             self.currentDevice = device
 
@@ -417,7 +417,7 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
 
         let settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
         settings.flashMode = flashOn ? .on : .off
-        settings.photoQualityPrioritization = .speed
+        settings.photoQualityPrioritization = .balanced
         photoOutput.capturePhoto(with: settings, delegate: self)
     }
 
