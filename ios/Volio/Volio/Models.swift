@@ -336,9 +336,22 @@ final class VolioSession {
         guard let context = modelContext else { return }
         VolioPerformance.begin("swiftdata_fetch")
         let descriptor = FetchDescriptor<LocalWork>(sortBy: [SortDescriptor(\.capturedAt, order: .reverse)])
-        works = (try? context.fetch(descriptor)) ?? []
+        do {
+            works = try context.fetch(descriptor)
+        } catch {
+            errorMessage = works.isEmpty
+                ? "Could not load the iPhone library."
+                : "Could not refresh the iPhone library. Showing saved works."
+            VolioPerformance.end("swiftdata_fetch")
+            return
+        }
+
         let jobDescriptor = FetchDescriptor<LocalProcessingJob>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
-        processingJobs = (try? context.fetch(jobDescriptor)) ?? []
+        do {
+            processingJobs = try context.fetch(jobDescriptor)
+        } catch {
+            processingJobs = []
+        }
         VolioPerformance.end("swiftdata_fetch")
         if localMigrationVersion < targetLocalMigrationVersion {
             migrateLegacyAssetsIfNeeded(context: context)
@@ -456,9 +469,26 @@ final class VolioSession {
             await mergeMacArtworks(bootstrap.artworks, client: client)
         } catch {
             if showError {
-                errorMessage = "Could not reach Volio Desktop."
+                errorMessage = macRefreshErrorMessage(for: error)
             }
         }
+    }
+
+    private func macRefreshErrorMessage(for error: Error) -> String {
+        if let apiError = error as? VolioAPIError {
+            switch apiError {
+            case .server(let message):
+                if message.localizedCaseInsensitiveContains("pair") ||
+                    message.localizedCaseInsensitiveContains("token") ||
+                    message.localizedCaseInsensitiveContains("unauthorized") {
+                    return "Pair with Volio Desktop again. Showing the iPhone library."
+                }
+                if !message.isEmpty {
+                    return "\(message) Showing the iPhone library."
+                }
+            }
+        }
+        return "Volio Desktop is unavailable. Showing the iPhone library."
     }
 
     func requestMacLibraryRefresh(delayNanoseconds: UInt64 = 900_000_000) {
@@ -658,13 +688,17 @@ final class VolioSession {
         let activeRemoteIds = Set(artworks.map(\.id))
         for local in works where local.remoteArtworkId != nil {
             if let remoteId = local.remoteArtworkId, !activeRemoteIds.contains(remoteId), local.lastSyncedAt != nil {
-                ImageStorage.deleteWork(local.id)
-                modelContext?.delete(local)
+                if hasLocalOriginal(for: local) {
+                    local.remoteArtworkId = nil
+                    local.remoteUpdatedAt = nil
+                    local.lastSyncedAt = nil
+                    local.processingError = "Saved on this iPhone. Volio will copy it to Desktop again."
+                    local.localUpdatedAt = local.localUpdatedAt ?? Date()
+                    enqueueMacLibraryCopy(for: local)
+                } else {
+                    local.processingError = "The Desktop copy is missing, and the original is not on this iPhone."
+                }
             }
-        }
-        works.removeAll { work in
-            guard let remoteId = work.remoteArtworkId, work.lastSyncedAt != nil else { return false }
-            return !activeRemoteIds.contains(remoteId)
         }
         try? modelContext?.save()
 
@@ -685,6 +719,16 @@ final class VolioSession {
                 await importRemoteArtwork(remote, client: client)
             }
         }
+    }
+
+    private func hasLocalOriginal(for work: LocalWork) -> Bool {
+        if ImageStorage.hasOriginal(id: work.id) {
+            return true
+        }
+        guard let path = work.originalPath else {
+            return false
+        }
+        return FileManager.default.fileExists(atPath: path)
     }
 
     private func ensureLocalMedia(for work: LocalWork, remote: Artwork, client: VolioAPIClient) async {

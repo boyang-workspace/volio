@@ -4,8 +4,8 @@ struct VolioAPIClient {
     let baseURL: String
     let token: String
 
-    private var root: URL {
-        URL(string: baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")))!
+    private var root: URL? {
+        URL(string: baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")))
     }
 
     func bootstrap() async throws -> Bootstrap {
@@ -30,7 +30,7 @@ struct VolioAPIClient {
     }
 
     func deleteArtwork(id: String) async throws {
-        var request = authorizedRequest(path: "/api/ios/artworks/\(id)")
+        var request = try authorizedRequest(path: "/api/ios/artworks/\(id)")
         request.httpMethod = "DELETE"
         let (_, response) = try await URLSession.shared.data(for: request)
         try validate(response)
@@ -89,7 +89,7 @@ struct VolioAPIClient {
         }
         body.append("--\(boundary)--\r\n".data(using: .utf8)!)
 
-        var request = authorizedRequest(path: "/api/ios/import")
+        var request = try authorizedRequest(path: "/api/ios/import")
         request.httpMethod = "POST"
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
@@ -118,7 +118,7 @@ struct VolioAPIClient {
         body.append("\r\n".data(using: .utf8)!)
         body.append("--\(boundary)--\r\n".data(using: .utf8)!)
 
-        var request = authorizedRequest(path: "/api/ios/process/jobs")
+        var request = try authorizedRequest(path: "/api/ios/process/jobs")
         request.httpMethod = "POST"
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
@@ -141,7 +141,10 @@ struct VolioAPIClient {
     }
 
     private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> T {
-        var components = URLComponents(url: root.appending(path: path), resolvingAgainstBaseURL: false)!
+        guard let root,
+              var components = URLComponents(url: root.appending(path: path), resolvingAgainstBaseURL: false) else {
+            throw VolioAPIError.server("Volio Desktop address is invalid. Pair again.")
+        }
         if !query.isEmpty {
             components.queryItems = query
         }
@@ -151,7 +154,7 @@ struct VolioAPIClient {
     }
 
     private func request<T: Decodable>(_ path: String, method: String, body: Data?) async throws -> T {
-        var request = authorizedRequest(path: path)
+        var request = try authorizedRequest(path: path)
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
@@ -164,8 +167,11 @@ struct VolioAPIClient {
         return try JSONDecoder.volio.decode(T.self, from: data)
     }
 
-    private func authorizedRequest(path: String) -> URLRequest {
-        authorizedRequest(url: root.appending(path: path))
+    private func authorizedRequest(path: String) throws -> URLRequest {
+        guard let root else {
+            throw VolioAPIError.server("Volio Desktop address is invalid. Pair again.")
+        }
+        return authorizedRequest(url: root.appending(path: path))
     }
 
     private func authorizedRequest(url: URL) -> URLRequest {
