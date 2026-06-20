@@ -49,11 +49,7 @@ private struct AppStoreHeaderMotion: ViewModifier {
 struct GalleryView: View {
     @Environment(VolioSession.self) private var session
     @Environment(\.dismissVolioTransientOverlays) private var dismissTransientOverlays
-    @Environment(\.setVolioAddControlSuppressed) private var setAddControlSuppressed
     @State private var showSettings = false
-    @State private var selectedIds = Set<String>()
-    @State private var isSelecting = false
-    @State private var showDeleteConfirmation = false
     @State private var navigationPath = NavigationPath()
 
     var body: some View {
@@ -69,17 +65,13 @@ struct GalleryView: View {
                     } else {
                         MasonryGrid(
                             works: session.works,
-                            isSelecting: isSelecting,
-                            selectedIds: selectedIds,
-                            onOpenWork: openWork,
-                            onToggleSelection: toggleSelection,
-                            onStartSelection: startSelection
+                            onOpenWork: openWork
                         )
                     }
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 10)
-                .padding(.bottom, isSelecting ? 132 : 96)
+                .padding(.bottom, 96)
             }
             .background(VolioTheme.paper.ignoresSafeArea())
             .simultaneousGesture(
@@ -96,23 +88,8 @@ struct GalleryView: View {
             .navigationDestination(for: LocalWork.self) { work in
                 ArtworkDetailView(work: work)
             }
-            .overlay(alignment: .bottom) {
-                if isSelecting {
-                    selectionBar
-                }
-            }
-            .volioDeleteConfirmation(
-                isPresented: $showDeleteConfirmation,
-                count: selectedIds.count,
-                action: deleteSelected
-            )
             .onDisappear {
-                clearSelection()
                 dismissTransientOverlays()
-                setAddControlSuppressed(false)
-            }
-            .onChange(of: isSelecting) { _, newValue in
-                setAddControlSuppressed(newValue)
             }
         }
     }
@@ -128,21 +105,6 @@ struct GalleryView: View {
                     .frame(width: 52, height: 52)
                     .volioGlass(cornerRadius: 26, interactive: true)
             }
-            .buttonStyle(.plain)
-        }
-    }
-
-    private var galleryActions: some View {
-        HStack {
-            Spacer()
-            Button(isSelecting ? "Done" : "Select") {
-                isSelecting.toggle()
-                if !isSelecting { selectedIds.removeAll() }
-            }
-            .font(.subheadline.weight(.semibold))
-            .padding(.horizontal, 14)
-            .frame(height: 38)
-            .volioGlass(cornerRadius: 19, interactive: true)
             .buttonStyle(.plain)
         }
     }
@@ -165,103 +127,69 @@ struct GalleryView: View {
         .frame(maxWidth: .infinity)
     }
 
-    private var selectionBar: some View {
-        HStack(spacing: 14) {
-            Button {
-                clearSelection()
-            } label: {
-                Text("Done")
-                    .frame(width: 82)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.large)
-
-            Button {
-                showDeleteConfirmation = true
-            } label: {
-                Label("Delete \(selectedIds.count)", systemImage: "trash")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.red)
-            .controlSize(.large)
-            .disabled(selectedIds.isEmpty)
-        }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 12)
-        .background(.ultraThinMaterial)
-    }
-
-    private func startSelection(_ work: LocalWork) {
-        guard !isSelecting else { return }
-        dismissTransientOverlays()
-        setAddControlSuppressed(true)
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        withTransaction(Transaction(animation: nil)) {
-            isSelecting = true
-            selectedIds.insert(work.id)
-        }
-    }
-
     private func openWork(_ work: LocalWork) {
-        clearSelection()
         dismissTransientOverlays()
         navigationPath.append(work)
-    }
-
-    private func toggleSelection(_ work: LocalWork) {
-        if selectedIds.contains(work.id) {
-            withTransaction(Transaction(animation: nil)) {
-                selectedIds.remove(work.id)
-            }
-        } else {
-            withTransaction(Transaction(animation: nil)) {
-                selectedIds.insert(work.id)
-            }
-        }
-    }
-
-    private func deleteSelected() {
-        for id in selectedIds {
-            if let work = session.works.first(where: { $0.id == id }) {
-                session.deleteWork(work)
-            }
-        }
-        clearSelection()
-    }
-
-    private func clearSelection() {
-        withTransaction(Transaction(animation: nil)) {
-            selectedIds.removeAll()
-            isSelecting = false
-            showDeleteConfirmation = false
-        }
-        setAddControlSuppressed(false)
     }
 }
 
 struct TimelineView: View {
     @Environment(VolioSession.self) private var session
     @Environment(\.dismissVolioTransientOverlays) private var dismissTransientOverlays
-    @Environment(\.setVolioAddControlSuppressed) private var setAddControlSuppressed
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showSettings = false
-    @State private var selectedIds = Set<String>()
-    @State private var isSelecting = false
-    @State private var showDeleteConfirmation = false
     @State private var navigationPath = NavigationPath()
+    @State private var surfaceEpoch = Int(Date().timeIntervalSince1970 / 86_400)
+    @State private var surfacedIDs = Set<String>()
+    @State private var placementContext: FloatingPlacementContext?
+    @State private var stableFloatingAssignments: [String: [FloatingWorkAssignment]] = [:]
+    @State private var undoPlacement: PlacementUndoState?
 
-    private var groups: [(title: String, subtitle: String, works: [LocalWork])] {
-        let grouped = Dictionary(grouping: session.works) { work in
-            work.timelineGroupTitle
+    private var sections: [TimelineSectionModel] {
+        TimelineGroupingService.sections(for: session.works)
+    }
+
+    private var displaySections: [TimelineSectionModel] {
+        if !sections.isEmpty {
+            return sections
         }
-        return grouped.map { title, works in
-            let sorted = works.sorted { $0.capturedAt > $1.capturedAt }
-            let subtitle = sorted.first?.createdAroundLabel ?? ""
-            return (title, subtitle, sorted)
+        guard !unplacedWorksForSurfacing.isEmpty else {
+            return []
         }
-        .sorted { left, right in
-            groupSortValue(left.title, works: left.works) > groupSortValue(right.title, works: right.works)
-        }
+        return [
+            TimelineSectionModel(
+                id: "unplaced-prompts",
+                title: "Recently saved",
+                subtitle: "Waiting for a remembered time",
+                sortKey: Date().timeIntervalSince1970,
+                placementInput: .unknown,
+                works: []
+            )
+        ]
+    }
+
+    private var unplacedWorksForSurfacing: [LocalWork] {
+        TimelineGroupingService.unplacedWorks(from: session.works)
+    }
+
+    private var assignmentContextKey: String {
+        [
+            String(surfaceEpoch),
+            displaySections.map(\.id).joined(separator: "|"),
+            unplacedWorksForSurfacing.map(\.id).sorted().joined(separator: "|")
+        ].joined(separator: "::")
+    }
+
+    private var activeFloatingAssignments: [String: [FloatingWorkAssignment]] {
+        stableFloatingAssignments
+    }
+
+    private var activeFloatingWorkIDs: [String] {
+        activeFloatingAssignments.flatMap { $0.value.map(\.work.id) }.sorted()
+    }
+
+    private var hasAnyWorks: Bool {
+        !session.works.isEmpty
     }
 
     var body: some View {
@@ -273,27 +201,34 @@ struct TimelineView: View {
                     }
                     .padding(.horizontal, 18)
 
-                    if session.works.isEmpty {
+                    if !hasAnyWorks {
                         ContentUnavailableView("No timeline yet", systemImage: "clock", description: Text("Capture or sync works to build a creative timeline."))
                             .frame(maxWidth: .infinity)
                             .padding(.top, 120)
+                    } else if displaySections.isEmpty {
+                        ContentUnavailableView(
+                            "No remembered times yet",
+                            systemImage: "sparkles",
+                            description: Text("Works are saved. Volio will gently resurface the ones whose time you have not remembered yet.")
+                        )
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 120)
                     } else {
-                        ForEach(groups, id: \.title) { group in
+                        ForEach(displaySections) { section in
                             TimelineAgeSection(
-                                title: group.title,
-                                subtitle: group.subtitle,
-                                works: group.works,
-                                isSelecting: isSelecting,
-                                selectedIds: selectedIds,
-                                onOpenWork: openWork,
-                                onToggleSelection: toggleSelection,
-                                onStartSelection: startSelection
-                            )
+                                title: section.title,
+                                subtitle: section.subtitle,
+                                works: section.works,
+                                floatingItems: activeFloatingAssignments[section.id] ?? [],
+                                onOpenWork: openWork
+                            ) { assignment in
+                                placementContext = FloatingPlacementContext(work: assignment.work, section: section)
+                            }
                         }
                     }
                 }
                 .padding(.top, 10)
-                .padding(.bottom, isSelecting ? 132 : 96)
+                .padding(.bottom, 96)
             }
             .background(VolioTheme.paper.ignoresSafeArea())
             .simultaneousGesture(
@@ -307,26 +242,55 @@ struct TimelineView: View {
             .sheet(isPresented: $showSettings) {
                 NavigationStack { SettingsContent() }
             }
+            .sheet(item: $placementContext) { context in
+                PlaceArtworkSheet(
+                    context: context,
+                    earlierSection: adjacentSection(from: context.section, direction: .earlier),
+                    laterSection: adjacentSection(from: context.section, direction: .later),
+                    onPlace: { work, section in
+                        place(work, in: section)
+                    },
+                    onChooseTime: { work, input in
+                        place(work, using: input)
+                    },
+                    onMove: { section in
+                        placementContext = FloatingPlacementContext(work: context.work, section: section)
+                    },
+                    onSnooze: { work in
+                        snooze(work)
+                    }
+                )
+                .environment(session)
+            }
             .navigationDestination(for: LocalWork.self) { work in
                 ArtworkDetailView(work: work)
             }
             .overlay(alignment: .bottom) {
-                if isSelecting {
-                    selectionBar
+                if let undoPlacement {
+                    PlacementUndoToast(
+                        state: undoPlacement,
+                        onUndo: undoLastPlacement
+                    )
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 104)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
-            .volioDeleteConfirmation(
-                isPresented: $showDeleteConfirmation,
-                count: selectedIds.count,
-                action: deleteSelected
-            )
             .onDisappear {
-                clearSelection()
                 dismissTransientOverlays()
-                setAddControlSuppressed(false)
             }
-            .onChange(of: isSelecting) { _, newValue in
-                setAddControlSuppressed(newValue)
+            .onAppear {
+                rebuildFloatingAssignmentsIfNeeded()
+            }
+            .onChange(of: assignmentContextKey) { _, _ in
+                rebuildFloatingAssignmentsIfNeeded()
+            }
+            .task(id: activeFloatingWorkIDs.joined(separator: ",")) {
+                let ids = Set(activeFloatingWorkIDs)
+                let newIDs = ids.subtracting(surfacedIDs)
+                guard !newIDs.isEmpty else { return }
+                surfacedIDs.formUnion(newIDs)
+                session.markWorksSurfaced(Array(newIDs))
             }
         }
     }
@@ -346,98 +310,214 @@ struct TimelineView: View {
         }
     }
 
-    private var selectionBar: some View {
-        HStack(spacing: 14) {
-            Button {
-                clearSelection()
-            } label: {
-                Text("Done")
-                    .frame(width: 82)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.large)
-
-            Button {
-                showDeleteConfirmation = true
-            } label: {
-                Label("Delete \(selectedIds.count)", systemImage: "trash")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.red)
-            .controlSize(.large)
-            .disabled(selectedIds.isEmpty)
-        }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 12)
-        .background(.ultraThinMaterial)
-    }
-
-    private func startSelection(_ work: LocalWork) {
-        guard !isSelecting else { return }
-        dismissTransientOverlays()
-        setAddControlSuppressed(true)
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        withTransaction(Transaction(animation: nil)) {
-            isSelecting = true
-            selectedIds.insert(work.id)
-        }
-    }
-
     private func openWork(_ work: LocalWork) {
-        clearSelection()
         dismissTransientOverlays()
         navigationPath.append(work)
     }
 
-    private func toggleSelection(_ work: LocalWork) {
-        if selectedIds.contains(work.id) {
-            withTransaction(Transaction(animation: nil)) {
-                selectedIds.remove(work.id)
-            }
-        } else {
-            withTransaction(Transaction(animation: nil)) {
-                selectedIds.insert(work.id)
+    private func rebuildFloatingAssignmentsIfNeeded() {
+        stableFloatingAssignments = FloatingArtworkSurfacingService.assignments(
+            sections: displaySections,
+            unplacedWorks: unplacedWorksForSurfacing,
+            surfaceEpoch: surfaceEpoch
+        )
+    }
+
+    private func place(_ work: LocalWork, in section: TimelineSectionModel) {
+        place(work, using: section.placementInput, sectionTitle: section.title)
+    }
+
+    private func place(_ work: LocalWork, using input: CreatedAroundInput, sectionTitle: String? = nil) {
+        let snapshot = CreationTimeSnapshot(work: work)
+        withAnimation(reduceMotion ? .easeInOut(duration: 0.18) : .spring(response: 0.42, dampingFraction: 0.86)) {
+            session.updateCreationTime(work, createdAround: input)
+            placementContext = nil
+            undoPlacement = PlacementUndoState(
+                workID: work.id,
+                snapshot: snapshot,
+                message: "Placed in \"\(sectionTitle ?? work.createdAroundLabel)\""
+            )
+        }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            if undoPlacement?.workID == work.id {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    undoPlacement = nil
+                }
             }
         }
     }
 
-    private func deleteSelected() {
-        for id in selectedIds {
-            if let work = session.works.first(where: { $0.id == id }) {
-                session.deleteWork(work)
+    private func snooze(_ work: LocalWork) {
+        session.snoozeUnplacedWork(work)
+        surfacedIDs.insert(work.id)
+        placementContext = nil
+        rebuildFloatingAssignmentsIfNeeded()
+    }
+
+    private func undoLastPlacement() {
+        guard let undoPlacement,
+              let work = session.works.first(where: { $0.id == undoPlacement.workID })
+        else { return }
+        withAnimation(reduceMotion ? .easeInOut(duration: 0.18) : .spring(response: 0.36, dampingFraction: 0.9)) {
+            session.restoreCreationTime(work, snapshot: undoPlacement.snapshot)
+            self.undoPlacement = nil
+            rebuildFloatingAssignmentsIfNeeded()
+        }
+    }
+
+    private enum TimelineDirection {
+        case earlier
+        case later
+    }
+
+    private func adjacentSection(from section: TimelineSectionModel, direction: TimelineDirection) -> TimelineSectionModel? {
+        guard let index = sections.firstIndex(where: { $0.id == section.id }) else { return nil }
+        switch direction {
+        case .earlier:
+            let next = index + 1
+            return sections.indices.contains(next) ? sections[next] : nil
+        case .later:
+            let previous = index - 1
+            return sections.indices.contains(previous) ? sections[previous] : nil
+        }
+    }
+}
+
+struct TimelineSectionModel: Identifiable {
+    var id: String
+    var title: String
+    var subtitle: String
+    var sortKey: Double
+    var placementInput: CreatedAroundInput
+    var works: [LocalWork]
+}
+
+enum TimelineGroupingService {
+    static func sections(for works: [LocalWork]) -> [TimelineSectionModel] {
+        let placed = works.filter { !$0.isTimeUnplaced }
+        let grouped = Dictionary(grouping: placed) { work in
+            sectionID(for: work)
+        }
+        return grouped.map { id, works in
+            let sorted = works.sorted { sortKey(for: $0) > sortKey(for: $1) }
+            let title = sorted.first?.timelineGroupTitle ?? id
+            let subtitle = subtitle(for: sorted)
+            return TimelineSectionModel(
+                id: id,
+                title: title,
+                subtitle: subtitle,
+                sortKey: sorted.map(sortKey(for:)).max() ?? 0,
+                placementInput: placementInput(for: sorted.first),
+                works: sorted
+            )
+        }
+        .sorted { left, right in
+            left.sortKey > right.sortKey
+        }
+    }
+
+    static func unplacedWorks(from works: [LocalWork]) -> [LocalWork] {
+        works
+            .filter { work in
+                let canSurface = work.snoozedUntil.map { $0 <= Date() } ?? true
+                return canSurface && work.isTimeUnplaced && (ImageStorage.hasThumbnail(id: work.id) || ImageStorage.hasOriginal(id: work.id))
             }
-        }
-        clearSelection()
+            .sorted { left, right in
+                if left.surfaceCount != right.surfaceCount {
+                    return left.surfaceCount < right.surfaceCount
+                }
+                return (left.lastSurfacedAt ?? .distantPast) < (right.lastSurfacedAt ?? .distantPast)
+            }
     }
 
-    private func clearSelection() {
-        withTransaction(Transaction(animation: nil)) {
-            selectedIds.removeAll()
-            isSelecting = false
-            showDeleteConfirmation = false
+    static func sectionID(for work: LocalWork) -> String {
+        if let lifeStageID = work.lifeStageID, !lifeStageID.isEmpty {
+            return "life:\(lifeStageID)"
         }
-        setAddControlSuppressed(false)
+        if let start = work.creationAgeStartMonths {
+            if let end = work.creationAgeEndMonths, end != start {
+                return "age_range:\(start)-\(end)"
+            }
+            return "age:\(start / 12)"
+        }
+        if let months = work.createdAroundAgeMonths ?? work.ageAtCreationMonths {
+            return "age:\(months / 12)"
+        }
+        if work.creationTimeKind == .season,
+           let year = work.creationYear ?? work.createdAroundYear,
+           let season = work.creationSeasonRaw ?? work.createdAroundSeason {
+            return "season:\(year):\(season)"
+        }
+        if let year = work.creationYear ?? work.createdAroundYear {
+            return "year:\(year)"
+        }
+        return "captured:\(Calendar.current.component(.year, from: work.capturedAt))"
     }
 
-    private func groupSortValue(_ title: String, works: [LocalWork]) -> TimeInterval {
-        if title.hasPrefix("Age "), let years = Int(title.replacingOccurrences(of: "Age ", with: "")) {
-            return TimeInterval(10_000_000 + years)
+    static func sortKey(for work: LocalWork) -> Double {
+        work.timelineSortKey ?? LocalWork.sortKey(
+            dateStart: work.creationDateStart,
+            dateEnd: work.creationDateEnd,
+            ageStartMonths: work.creationAgeStartMonths ?? work.createdAroundAgeMonths ?? work.ageAtCreationMonths,
+            ageEndMonths: work.creationAgeEndMonths,
+            year: work.creationYear ?? work.createdAroundYear,
+            month: work.creationMonth ?? work.createdAroundMonth,
+            capturedAt: work.capturedAt,
+            placement: work.timelinePlacementState
+        ) ?? work.capturedAt.timeIntervalSince1970
+    }
+
+    private static func subtitle(for works: [LocalWork]) -> String {
+        let labels = Array(NSOrderedSet(array: works.map(\.createdAroundLabel))).compactMap { $0 as? String }
+        guard let first = labels.first else { return "" }
+        return labels.count == 1 ? first : "\(works.count) works"
+    }
+
+    static func placementInput(for work: LocalWork?) -> CreatedAroundInput {
+        guard let work else { return .unknown }
+        switch work.creationTimeKind {
+        case .exactDate:
+            if let date = work.creationDateStart { return .exactDate(date) }
+        case .yearMonth:
+            if let year = work.creationYear ?? work.createdAroundYear,
+               let month = work.creationMonth ?? work.createdAroundMonth {
+                return .yearMonth(year, month)
+            }
+        case .season:
+            if let season = work.creationSeasonRaw ?? work.createdAroundSeason,
+               let year = work.creationYear ?? work.createdAroundYear {
+                return .season(season, year)
+            }
+        case .year:
+            if let year = work.creationYear ?? work.createdAroundYear {
+                return .year(year)
+            }
+        case .age:
+            if let months = work.creationAgeStartMonths ?? work.createdAroundAgeMonths ?? work.ageAtCreationMonths {
+                return .ageYears(max(0, months) / 12)
+            }
+        case .ageRange:
+            if let start = work.creationAgeStartMonths,
+               let end = work.creationAgeEndMonths {
+                return .ageRange(max(0, start) / 12, max(0, end) / 12)
+            }
+        case .lifeStage:
+            if let id = work.lifeStageID {
+                return .lifeStage(id, work.customTimeLabel ?? work.timelineGroupTitle)
+            }
+        case .capturedDate:
+            return .capturedDate
+        case .relative, .unknown:
+            break
         }
-        if let year = Int(title) {
-            return TimeInterval(year)
-        }
-        return works.first?.capturedAt.timeIntervalSince1970 ?? 0
+        return .unknown
     }
 }
 
 struct MasonryGrid: View {
     var works: [LocalWork]
-    var isSelecting = false
-    var selectedIds = Set<String>()
     var onOpenWork: (LocalWork) -> Void = { _ in }
-    var onToggleSelection: (LocalWork) -> Void = { _ in }
-    var onStartSelection: (LocalWork) -> Void = { _ in }
 
     private var sortedWorks: [LocalWork] {
         works.sorted { $0.capturedAt > $1.capturedAt }
@@ -446,33 +526,11 @@ struct MasonryGrid: View {
     var body: some View {
         RowMasonryLayout(columns: 2, spacing: 10) {
             ForEach(sortedWorks) { work in
-                if isSelecting {
-                    MasonryTile(work: work)
-                        .overlay(alignment: .topTrailing) {
-                            Image(systemName: selectedIds.contains(work.id) ? "checkmark.circle.fill" : "circle")
-                                .font(.title3)
-                                .foregroundStyle(selectedIds.contains(work.id) ? VolioTheme.accent : .white.opacity(0.84))
-                                .shadow(radius: 1)
-                                .padding(6)
-                        }
-                        .contentShape(RoundedRectangle(cornerRadius: 12))
-                        .onTapGesture { onToggleSelection(work) }
-                } else {
-                    MasonryTile(work: work)
-                        .contentShape(RoundedRectangle(cornerRadius: 12))
-                        .gesture(
-                            LongPressGesture(minimumDuration: 0.42)
-                                .exclusively(before: TapGesture())
-                                .onEnded { value in
-                                    switch value {
-                                    case .first(_):
-                                        onStartSelection(work)
-                                    case .second(_):
-                                        onOpenWork(work)
-                                    }
-                                }
-                        )
-                }
+                MasonryTile(work: work)
+                    .contentShape(RoundedRectangle(cornerRadius: 12))
+                    .onTapGesture {
+                        onOpenWork(work)
+                    }
             }
         }
     }
@@ -480,7 +538,12 @@ struct MasonryGrid: View {
 
 struct MasonryTile: View {
     var work: LocalWork
-    @State private var displayAspectRatio: CGFloat = 0.78
+    @State private var displayAspectRatio: CGFloat
+
+    init(work: LocalWork) {
+        self.work = work
+        _displayAspectRatio = State(initialValue: work.imageAspectRatio)
+    }
 
     var body: some View {
         MasonryImage(
@@ -500,63 +563,21 @@ struct MasonryImage: View {
     var primaryPath: String?
     var fallbackPath: String?
     @Binding var displayAspectRatio: CGFloat
-    @State private var image: UIImage?
-    @State private var loadKey: String?
 
     var body: some View {
-        Group {
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                Rectangle()
-                    .fill(.quaternary)
-                    .overlay {
-                        Image(systemName: "photo")
-                            .foregroundStyle(.tertiary)
-                    }
+        CachedArtworkImage(
+            workID: workId,
+            thumbnailPath: primaryPath,
+            originalPath: fallbackPath ?? inferredOriginalPath(from: primaryPath),
+            targetSize: CGSize(width: 260, height: 340),
+            aspectRatio: displayAspectRatio,
+            onMetadata: { metadata in
+                guard let ratio = metadata.aspectRatio else { return }
+                displayAspectRatio = min(max(ratio, 0.55), 1.65)
             }
-        }
-        .aspectRatio(displayAspectRatio, contentMode: .fill)
-        .clipped()
-        .task(id: "\(workId ?? "")|\(primaryPath ?? "")|\(fallbackPath ?? "")") {
-            await loadImage()
-        }
-    }
-
-    @MainActor
-    private func loadImage() async {
-        let key = "\(workId ?? "")|\(primaryPath ?? "")|\(fallbackPath ?? "")"
-        guard loadKey != key else { return }
-        loadKey = key
-        image = nil
-        let candidates = [
-            workId.map(ImageStorage.thumbnailPath(for:)),
-            workId.map(ImageStorage.originalPath(for:)),
-            primaryPath,
-            fallbackPath,
-            inferredOriginalPath(from: primaryPath)
-        ]
-            .compactMap { $0 }
-            .filter { !$0.isEmpty }
-        let loaded = await Task.detached(priority: .utility) { () -> UIImage? in
-            for path in candidates {
-                if FileManager.default.fileExists(atPath: path),
-                   let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-                   let image = UIImage(data: data) {
-                    return image
-                }
-            }
-            return nil as UIImage?
-        }.value
-        if loadKey == key {
-            if let loaded {
-                let rawRatio = max(0.1, loaded.size.width / max(loaded.size.height, 1))
-                displayAspectRatio = max(rawRatio, 0.68)
-            }
-            image = loaded
-        }
+        )
+            .aspectRatio(displayAspectRatio, contentMode: .fill)
+            .clipped()
     }
 
     private func inferredOriginalPath(from path: String?) -> String? {
@@ -734,7 +755,7 @@ struct SearchView: View {
     private var semanticCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Label("Semantic Search", systemImage: "sparkle.magnifyingglass")
+                Label("Smart Search", systemImage: "sparkle.magnifyingglass")
                     .font(.headline.weight(.bold))
                     .foregroundStyle(VolioTheme.ink)
                 Spacer()
@@ -742,7 +763,7 @@ struct SearchView: View {
                     .labelsHidden()
                     .tint(VolioTheme.accent)
             }
-            Text("Search across AI descriptions, tags, materials, colors, age, and notes. A Mac semantic index can plug into this same page next.")
+            Text("Search across AI descriptions, tags, materials, colors, ages, and notes. A deeper Mac index can plug into this page later.")
                 .font(.subheadline)
                 .foregroundStyle(VolioTheme.mutedInk)
                 .fixedSize(horizontal: false, vertical: true)
@@ -921,84 +942,482 @@ struct FlowLayout: Layout {
 }
 
 private struct TimelineAgeSection: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     var title: String
     var subtitle: String
     var works: [LocalWork]
-    var isSelecting = false
-    var selectedIds = Set<String>()
+    var floatingItems: [FloatingWorkAssignment] = []
     var onOpenWork: (LocalWork) -> Void = { _ in }
-    var onToggleSelection: (LocalWork) -> Void = { _ in }
-    var onStartSelection: (LocalWork) -> Void = { _ in }
+    var onOpenFloatingWork: (FloatingWorkAssignment) -> Void = { _ in }
 
     private let columns = [GridItem(.adaptive(minimum: 86), spacing: 8)]
+    private var useInlineFloating: Bool { dynamicTypeSize.isAccessibilitySize }
+    private var minimumSectionHeight: CGFloat? {
+        works.isEmpty && !floatingItems.isEmpty ? 420 : nil
+    }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            VStack(spacing: 5) {
-                Circle()
-                    .fill(VolioTheme.accent)
-                    .frame(width: 10, height: 10)
-                Rectangle()
-                    .fill(Color(.systemGray4))
-                    .frame(width: 2)
+        sectionContent
+            .frame(minHeight: minimumSectionHeight, alignment: .top)
+            .padding(.horizontal, 18)
+            .overlay {
+                if !useInlineFloating {
+                    FloatingWorksOverlay(
+                        items: floatingItems,
+                        sectionTitle: title,
+                        onOpen: onOpenFloatingWork
+                    )
+                }
             }
-            .frame(width: 16)
-            .padding(.top, 8)
+    }
+
+    private var sectionContent: some View {
+        HStack(alignment: .top, spacing: 12) {
+            timelineRail
 
             VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(title)
-                            .font(.title3.bold())
-                        if !subtitle.isEmpty && subtitle != title {
-                            Text(subtitle)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    Spacer()
-                    Text("\(works.count)")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(.quaternary, in: Capsule())
-                }
+                sectionHeader
 
                 LazyVGrid(columns: columns, spacing: 8) {
                     ForEach(works) { work in
-                        if isSelecting {
-                            TimelineTile(work: work)
-                                .overlay(alignment: .topTrailing) {
-                                    Image(systemName: selectedIds.contains(work.id) ? "checkmark.circle.fill" : "circle")
-                                        .font(.title3)
-                                        .foregroundStyle(selectedIds.contains(work.id) ? VolioTheme.accent : .white.opacity(0.84))
-                                        .shadow(radius: 1)
-                                        .padding(5)
-                                }
-                                .contentShape(RoundedRectangle(cornerRadius: 12))
-                                .onTapGesture { onToggleSelection(work) }
-                        } else {
-                            TimelineTile(work: work)
-                                .contentShape(RoundedRectangle(cornerRadius: 12))
-                                .gesture(
-                                    LongPressGesture(minimumDuration: 0.42)
-                                        .exclusively(before: TapGesture())
-                                        .onEnded { value in
-                                            switch value {
-                                            case .first(_):
-                                                onStartSelection(work)
-                                            case .second(_):
-                                                onOpenWork(work)
-                                            }
-                                        }
-                                )
+                        TimelineTile(work: work)
+                            .contentShape(RoundedRectangle(cornerRadius: 12))
+                            .onTapGesture {
+                                onOpenWork(work)
                         }
+                    }
+                }
+
+                if useInlineFloating && !floatingItems.isEmpty {
+                    FloatingMemoryStrip(
+                        items: floatingItems,
+                        sectionTitle: title,
+                        onOpen: onOpenFloatingWork
+                    )
+                }
+            }
+        }
+    }
+
+    private var timelineRail: some View {
+        VStack(spacing: 5) {
+            Circle()
+                .fill(VolioTheme.accent)
+                .frame(width: 10, height: 10)
+            Rectangle()
+                .fill(Color(.systemGray4))
+                .frame(width: 2)
+        }
+        .frame(width: 16)
+        .padding(.top, 8)
+    }
+
+    private var sectionHeader: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.title3.bold())
+                if !subtitle.isEmpty && subtitle != title {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+            Text("\(works.count)")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(.quaternary, in: Capsule())
+        }
+    }
+}
+
+struct FloatingPlacementContext: Identifiable {
+    var work: LocalWork
+    var section: TimelineSectionModel
+    var id: String { "\(work.id)::\(section.id)" }
+}
+
+struct PlacementUndoState: Identifiable {
+    var id: String { workID }
+    var workID: String
+    var snapshot: CreationTimeSnapshot
+    var message: String
+}
+
+enum FloatingSide {
+    case left
+    case right
+}
+
+struct FloatingWorkAssignment: Identifiable {
+    var id: String { "\(work.id)::\(sectionID)" }
+    var work: LocalWork
+    var sectionID: String
+    var side: FloatingSide
+    var rotation: Double
+    var verticalFraction: CGFloat
+    var horizontalInset: CGFloat
+    var size: CGFloat
+    var scale: CGFloat
+    var opacity: Double
+}
+
+enum FloatingArtworkSurfacingService {
+    static func assignments(
+        sections: [TimelineSectionModel],
+        unplacedWorks: [LocalWork],
+        surfaceEpoch: Int
+    ) -> [String: [FloatingWorkAssignment]] {
+        guard !sections.isEmpty, !unplacedWorks.isEmpty else { return [:] }
+
+        let candidates = unplacedWorks
+            .sorted { left, right in
+                if left.surfaceCount != right.surfaceCount {
+                    return left.surfaceCount < right.surfaceCount
+                }
+                let leftSeed = combinedSeed(workSeed: left.displaySeed, sectionID: "candidate", epoch: surfaceEpoch)
+                let rightSeed = combinedSeed(workSeed: right.displaySeed, sectionID: "candidate", epoch: surfaceEpoch)
+                return leftSeed < rightSeed
+            }
+            .prefix(min(6, unplacedWorks.count))
+
+        var assignments: [String: [FloatingWorkAssignment]] = [:]
+        var candidateIndex = candidates.startIndex
+        for section in sections where candidateIndex < candidates.endIndex {
+            var sectionItems: [FloatingWorkAssignment] = []
+            for side in [FloatingSide.left, .right] where candidateIndex < candidates.endIndex {
+                let work = candidates[candidateIndex]
+                sectionItems.append(makeAssignment(work: work, section: section, side: side, epoch: surfaceEpoch))
+                candidateIndex = candidates.index(after: candidateIndex)
+            }
+            if !sectionItems.isEmpty {
+                assignments[section.id] = sectionItems
+            }
+        }
+        return assignments
+    }
+
+    private static func makeAssignment(
+        work: LocalWork,
+        section: TimelineSectionModel,
+        side: FloatingSide,
+        epoch: Int
+    ) -> FloatingWorkAssignment {
+        let seed = combinedSeed(workSeed: work.displaySeed, sectionID: section.id, epoch: epoch)
+        return FloatingWorkAssignment(
+            work: work,
+            sectionID: section.id,
+            side: side,
+            rotation: value(seed: seed, salt: 3, range: -4...4),
+            verticalFraction: CGFloat(value(seed: seed, salt: 7, range: 0.34...0.82)),
+            horizontalInset: CGFloat(value(seed: seed, salt: 11, range: -10...12)),
+            size: CGFloat(value(seed: seed, salt: 13, range: 78...112)),
+            scale: CGFloat(value(seed: seed, salt: 17, range: 0.94...1.04)),
+            opacity: value(seed: seed, salt: 19, range: 0.90...1.0)
+        )
+    }
+
+    private static func combinedSeed(workSeed: Int64, sectionID: String, epoch: Int) -> UInt64 {
+        var hash = UInt64(bitPattern: workSeed)
+        hash ^= UInt64(epoch &* 16_777_619)
+        for byte in sectionID.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return hash == 0 ? 1 : hash
+    }
+
+    private static func value(seed: UInt64, salt: UInt64, range: ClosedRange<Double>) -> Double {
+        var mixed = seed ^ (salt &* 0x9E37_79B9_7F4A_7C15)
+        mixed ^= mixed >> 30
+        mixed &*= 0xBF58_476D_1CE4_E5B9
+        mixed ^= mixed >> 27
+        mixed &*= 0x94D0_49BB_1331_11EB
+        mixed ^= mixed >> 31
+        let unit = Double(mixed % 10_000) / 10_000
+        return range.lowerBound + unit * (range.upperBound - range.lowerBound)
+    }
+}
+
+private struct FloatingWorksOverlay: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var items: [FloatingWorkAssignment]
+    var sectionTitle: String
+    var onOpen: (FloatingWorkAssignment) -> Void
+
+    var body: some View {
+        GeometryReader { proxy in
+            ForEach(items) { item in
+                FloatingArtworkCard(
+                    assignment: item,
+                    sectionTitle: sectionTitle,
+                    onOpen: onOpen
+                )
+                .position(position(for: item, in: proxy.size))
+            }
+        }
+        .allowsHitTesting(!items.isEmpty)
+        .visualEffect { content, proxy in
+            guard !reduceMotion else { return content.offset(y: 0) }
+            let minY = proxy.frame(in: .scrollView).minY
+            let parallax = min(max(minY * -0.075, -28), 28)
+            return content.offset(y: parallax)
+        }
+    }
+
+    private func position(for item: FloatingWorkAssignment, in size: CGSize) -> CGPoint {
+        let x: CGFloat
+        switch item.side {
+        case .left:
+            x = max(22, item.size * 0.34 + item.horizontalInset)
+        case .right:
+            x = min(size.width - 22, size.width - item.size * 0.34 - item.horizontalInset)
+        }
+        let y = min(max(72, size.height * item.verticalFraction), max(72, size.height - 34))
+        return CGPoint(x: x, y: y)
+    }
+}
+
+private struct FloatingMemoryStrip: View {
+    var items: [FloatingWorkAssignment]
+    var sectionTitle: String
+    var onOpen: (FloatingWorkAssignment) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Some works are still finding their time")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(VolioTheme.mutedInk)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(items) { item in
+                        FloatingArtworkCard(
+                            assignment: item,
+                            sectionTitle: sectionTitle,
+                            onOpen: onOpen,
+                            compact: true
+                        )
                     }
                 }
             }
         }
-        .padding(.horizontal, 18)
+        .padding(.top, 6)
+    }
+}
+
+private struct FloatingArtworkCard: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var assignment: FloatingWorkAssignment
+    var sectionTitle: String
+    var onOpen: (FloatingWorkAssignment) -> Void
+    var compact = false
+
+    private var cardHeight: CGFloat {
+        compact ? 62 : assignment.size
+    }
+
+    private var cardWidth: CGFloat {
+        compact ? 62 : assignment.size * min(max(assignment.work.imageAspectRatio, 0.72), 1.45)
+    }
+
+    var body: some View {
+        Button {
+            onOpen(assignment)
+        } label: {
+            LocalThumbnail(
+                path: assignment.work.thumbnailPath ?? assignment.work.originalPath,
+                workId: assignment.work.id,
+                targetSize: CGSize(width: cardWidth * 2.4, height: cardHeight * 2.4)
+            )
+                .frame(width: cardWidth, height: cardHeight)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color.white.opacity(0.78), lineWidth: 1.5)
+                }
+                .shadow(color: .black.opacity(0.18), radius: 8, y: 5)
+        }
+        .buttonStyle(.plain)
+        .frame(width: cardWidth, height: cardHeight)
+        .scaleEffect(compact ? 1 : assignment.scale)
+        .rotationEffect(.degrees(compact ? 0 : assignment.rotation))
+        .opacity(compact ? 1 : assignment.opacity)
+        .visualEffect { content, proxy in
+            guard !compact, !reduceMotion else { return content.offset(y: 0) }
+            let minY = proxy.frame(in: .scrollView).minY
+            return content.offset(y: min(max(minY * -0.018, -8), 8))
+        }
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityHint("Double tap to try placing it near \(sectionTitle).")
+    }
+
+    private var accessibilityLabel: String {
+        let title = assignment.work.displayTitle
+        return "Work without a remembered time, \(title)."
+    }
+}
+
+private struct PlaceArtworkSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    var context: FloatingPlacementContext
+    var earlierSection: TimelineSectionModel?
+    var laterSection: TimelineSectionModel?
+    var onPlace: (LocalWork, TimelineSectionModel) -> Void
+    var onChooseTime: (LocalWork, CreatedAroundInput) -> Void
+    var onMove: (TimelineSectionModel) -> Void
+    var onSnooze: (LocalWork) -> Void
+    @State private var showCustomTime = false
+    @State private var draft = CreationTimeDraft(mode: .unknown)
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    header
+                    preview
+                    primaryActions
+                    if showCustomTime {
+                        CreationTimePicker(title: "Choose another time", draft: $draft)
+                        Button {
+                            onChooseTime(context.work, draft.input)
+                        } label: {
+                            Label("Place with this time", systemImage: "checkmark.circle.fill")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(VolioTheme.accent)
+                        .controlSize(.large)
+                    }
+                }
+                .padding(18)
+            }
+            .background(VolioTheme.paper.ignoresSafeArea())
+            .navigationTitle("Remember Time")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Remember when this was made?")
+                .font(.system(size: 28, weight: .black, design: .rounded))
+                .foregroundStyle(VolioTheme.ink)
+            Text("It appeared near \(context.section.title). That is only a memory prompt, not an AI guess.")
+                .font(.subheadline)
+                .foregroundStyle(VolioTheme.mutedInk)
+        }
+    }
+
+    private var preview: some View {
+        LocalThumbnail(
+            path: context.work.thumbnailPath ?? context.work.originalPath,
+            workId: context.work.id,
+            targetSize: CGSize(width: 680, height: 520)
+        )
+            .aspectRatio(context.work.imageAspectRatio, contentMode: .fit)
+            .frame(maxWidth: .infinity)
+            .frame(height: 240)
+            .clipShape(RoundedRectangle(cornerRadius: 20))
+            .overlay(alignment: .bottomLeading) {
+                Text(context.work.displayTitle)
+                    .font(.headline.weight(.bold))
+                    .foregroundStyle(.white)
+                    .padding(12)
+                    .shadow(radius: 4)
+            }
+    }
+
+    private var primaryActions: some View {
+        VStack(spacing: 10) {
+            Button {
+                onPlace(context.work, context.section)
+            } label: {
+                Label("This time feels right", systemImage: "checkmark.circle.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(VolioTheme.accent)
+            .controlSize(.large)
+
+            HStack(spacing: 10) {
+                Button {
+                    if let earlierSection {
+                        onMove(earlierSection)
+                    }
+                } label: {
+                    Label("Earlier", systemImage: "arrow.up")
+                        .frame(maxWidth: .infinity)
+                }
+                .disabled(earlierSection == nil)
+
+                Button {
+                    if let laterSection {
+                        onMove(laterSection)
+                    }
+                } label: {
+                    Label("Later", systemImage: "arrow.down")
+                        .frame(maxWidth: .infinity)
+                }
+                .disabled(laterSection == nil)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+
+            Button {
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.9)) {
+                    showCustomTime.toggle()
+                }
+            } label: {
+                Label("Choose another time", systemImage: "calendar")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+
+            Button {
+                onSnooze(context.work)
+            } label: {
+                Text("Not remembered yet")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.plain)
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(VolioTheme.mutedInk)
+            .padding(.top, 4)
+        }
+    }
+}
+
+private struct PlacementUndoToast: View {
+    var state: PlacementUndoState
+    var onUndo: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(state.message)
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(2)
+            Spacer()
+            Button("Undo", action: onUndo)
+                .font(.subheadline.weight(.bold))
+                .foregroundStyle(VolioTheme.accent)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay {
+            Capsule().stroke(Color.white.opacity(0.55), lineWidth: 1)
+        }
     }
 }
 

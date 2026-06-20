@@ -18,11 +18,10 @@ struct ContentView: View {
 
 struct RootTabsView: View {
     @Environment(VolioSession.self) private var session
-    @State private var selectedTab: MainTab = .gallery
-    @State private var lastContentTab: MainTab = .gallery
+    @State private var selectedTab: MainTab = .timeline
+    @State private var lastContentTab: MainTab = .timeline
     @State private var showCamera = false
     @State private var showAddMenu = false
-    @State private var isAddControlSuppressed = false
     @State private var showPhotoPicker = false
     @State private var photoPickerItems: [PhotosPickerItem] = []
 
@@ -30,11 +29,24 @@ struct RootTabsView: View {
         rootShell
         .tint(VolioTheme.accent)
         .environment(\.dismissVolioTransientOverlays, dismissTransientOverlays)
-        .environment(\.setVolioAddControlSuppressed, setAddControlSuppressed)
         .fullScreenCover(isPresented: $showCamera) {
             StackCameraView(
-                onCapture: { data in
-                    session.createWork(data: data, workType: "visual", createdAround: .capturedDate)
+                onCapture: { payload in
+                    Task {
+                        await session.createWorkAsync(
+                            data: payload.originalData,
+                            previewData: payload.previewData,
+                            workType: "visual",
+                            createdAround: .unknown
+                        )
+                    }
+                },
+                onDone: { _ in
+                    selectedTab = .gallery
+                    lastContentTab = .gallery
+                },
+                onCancel: {
+                    selectedTab = lastContentTab
                 }
             )
             .ignoresSafeArea()
@@ -73,14 +85,12 @@ struct RootTabsView: View {
                 lastContentTab: $lastContentTab,
                 showCamera: $showCamera,
                 showAddMenu: $showAddMenu,
-                isAddControlSuppressed: $isAddControlSuppressed,
                 showPhotoPicker: $showPhotoPicker
             )
         } else {
             LegacyRootTabsView(
                 selectedTab: $selectedTab,
                 showAddMenu: $showAddMenu,
-                isAddControlSuppressed: $isAddControlSuppressed,
                 showCamera: $showCamera,
                 showPhotoPicker: $showPhotoPicker,
                 onAdd: toggleAddMenu
@@ -89,7 +99,6 @@ struct RootTabsView: View {
     }
 
     private func toggleAddMenu() {
-        guard !isAddControlSuppressed else { return }
         withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
             showAddMenu.toggle()
         }
@@ -114,29 +123,17 @@ struct RootTabsView: View {
         }
     }
 
-    private func setAddControlSuppressed(_ isSuppressed: Bool) {
-        guard isAddControlSuppressed != isSuppressed else { return }
-        isAddControlSuppressed = isSuppressed
-        if isSuppressed {
-            dismissTransientOverlays()
-        }
-    }
-
     @MainActor
     private func importPhotos(_ items: [PhotosPickerItem]) async {
         guard !items.isEmpty else { return }
-        var loadedJPEGs: [Data] = []
         for item in items {
-            if let data = try? await item.loadTransferable(type: Data.self),
-               let image = UIImage(data: data),
-               let jpeg = image.jpegData(compressionQuality: 0.86) {
-                loadedJPEGs.append(jpeg)
+            if let data = try? await item.loadTransferable(type: Data.self) {
+                await session.createWorkAsync(data: data, workType: "visual", createdAround: .unknown)
             }
         }
-        for jpeg in loadedJPEGs {
-            session.createWork(data: jpeg, workType: "visual", createdAround: .capturedDate)
-        }
         photoPickerItems.removeAll()
+        selectedTab = .gallery
+        lastContentTab = .gallery
     }
 }
 
@@ -148,17 +145,6 @@ extension EnvironmentValues {
     var dismissVolioTransientOverlays: () -> Void {
         get { self[DismissVolioTransientOverlaysKey.self] }
         set { self[DismissVolioTransientOverlaysKey.self] = newValue }
-    }
-}
-
-private struct SetVolioAddControlSuppressedKey: EnvironmentKey {
-    static let defaultValue: (Bool) -> Void = { _ in }
-}
-
-extension EnvironmentValues {
-    var setVolioAddControlSuppressed: (Bool) -> Void {
-        get { self[SetVolioAddControlSuppressedKey.self] }
-        set { self[SetVolioAddControlSuppressedKey.self] = newValue }
     }
 }
 
@@ -187,7 +173,7 @@ enum MainTab: String, CaseIterable, Identifiable {
         }
     }
 
-    static var contentTabs: [MainTab] { [.gallery, .timeline, .search] }
+    static var contentTabs: [MainTab] { [.timeline, .gallery, .search] }
 }
 
 @available(iOS 18.0, *)
@@ -197,7 +183,6 @@ private struct SystemRootTabsView: View {
     @Binding var lastContentTab: MainTab
     @Binding var showCamera: Bool
     @Binding var showAddMenu: Bool
-    @Binding var isAddControlSuppressed: Bool
     @Binding var showPhotoPicker: Bool
 
     private var tabSelection: Binding<MainTab> {
@@ -205,7 +190,6 @@ private struct SystemRootTabsView: View {
             get: { selectedTab },
             set: { newValue in
                 if newValue == .capture {
-                    guard !isAddControlSuppressed else { return }
                     toggleAddMenu()
                     selectedTab = lastContentTab
                 } else {
@@ -219,12 +203,12 @@ private struct SystemRootTabsView: View {
 
     var body: some View {
         TabView(selection: tabSelection) {
-            Tab(MainTab.gallery.title, systemImage: MainTab.gallery.icon, value: MainTab.gallery) {
-                GalleryView()
-            }
-
             Tab(MainTab.timeline.title, systemImage: MainTab.timeline.icon, value: MainTab.timeline) {
                 TimelineView()
+            }
+
+            Tab(MainTab.gallery.title, systemImage: MainTab.gallery.icon, value: MainTab.gallery) {
+                GalleryView()
             }
 
             Tab(MainTab.search.title, systemImage: MainTab.search.icon, value: MainTab.search) {
@@ -240,12 +224,11 @@ private struct SystemRootTabsView: View {
                 AddTabTouchShield(onAdd: toggleAddMenu)
                     .padding(.trailing, 0)
                     .padding(.bottom, 0)
-                    .allowsHitTesting(!isAddControlSuppressed)
                     .zIndex(45)
             }
         }
         .overlay(alignment: .bottomTrailing) {
-            if showAddMenu, !session.isShowingDetail, !isAddControlSuppressed {
+            if showAddMenu, !session.isShowingDetail {
                 AddWorkMenu(
                     onTakePhoto: {
                         withAnimation(.spring(response: 0.24, dampingFraction: 0.9)) {
@@ -283,7 +266,6 @@ private struct SystemRootTabsView: View {
     }
 
     private func toggleAddMenu() {
-        guard !isAddControlSuppressed else { return }
         withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
             showAddMenu.toggle()
         }
@@ -308,8 +290,8 @@ private struct AddTabTouchShield: View {
     var body: some View {
         Button(action: onAdd) {
             Color.clear
-                .frame(width: 112, height: 104)
-                .contentShape(Rectangle())
+                .frame(width: 76, height: 76)
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Add work")
@@ -379,7 +361,6 @@ private struct LegacyRootTabsView: View {
     @Environment(VolioSession.self) private var session
     @Binding var selectedTab: MainTab
     @Binding var showAddMenu: Bool
-    @Binding var isAddControlSuppressed: Bool
     @Binding var showCamera: Bool
     @Binding var showPhotoPicker: Bool
     var onAdd: () -> Void
@@ -403,13 +384,12 @@ private struct LegacyRootTabsView: View {
         .overlay(alignment: .bottom) {
             if !session.isShowingDetail {
                 FloatingBottomControls(selectedTab: $selectedTab, showAddMenu: showAddMenu, onAdd: onAdd)
-                    .allowsHitTesting(!isAddControlSuppressed)
                     .transition(.scale(scale: 0.9).combined(with: .opacity))
                     .zIndex(20)
             }
         }
         .overlay(alignment: .bottomTrailing) {
-            if showAddMenu, !session.isShowingDetail, !isAddControlSuppressed {
+            if showAddMenu, !session.isShowingDetail {
                 AddWorkMenu(
                     onTakePhoto: {
                         withAnimation(.spring(response: 0.24, dampingFraction: 0.9)) {

@@ -9,6 +9,7 @@ struct VolioApp: App {
         WindowGroup {
             ContentView()
                 .environment(session)
+                .preferredColorScheme(.light)
         }
         .modelContainer(for: [LocalWork.self, LocalProfile.self, LocalAsset.self, LocalProcessingJob.self])
     }

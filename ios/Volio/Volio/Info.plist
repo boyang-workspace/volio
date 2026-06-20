@@ -46,6 +46,8 @@
 	<string>Volio imports selected artwork photos into your private archive.</string>
 	<key>UIRequiresFullScreen</key>
 	<true/>
+	<key>UIUserInterfaceStyle</key>
+	<string>Light</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

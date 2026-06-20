@@ -16,16 +16,19 @@ struct ArtworkDetailView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 20) {
-                // Image
-                if let path = work.originalPath, let data = try? Data(contentsOf: URL(fileURLWithPath: path)), let image = UIImage(data: data) {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
-                        .clipShape(RoundedRectangle(cornerRadius: 16))
-                        .shadow(color: .black.opacity(0.08), radius: 12, y: 4)
-                        .padding(.horizontal, 16)
-                        .padding(.top, 8)
-                }
+                CachedArtworkImage(
+                    workID: work.id,
+                    thumbnailPath: work.thumbnailPath,
+                    originalPath: work.originalPath,
+                    targetSize: CGSize(width: 720, height: 720),
+                    contentMode: .fit,
+                    aspectRatio: work.imageAspectRatio
+                )
+                .aspectRatio(work.imageAspectRatio, contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                .shadow(color: .black.opacity(0.08), radius: 12, y: 4)
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
 
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(alignment: .top, spacing: 10) {
@@ -174,6 +177,8 @@ struct ArtworkDetailView: View {
             DetailSection("Artwork Info") {
                 VStack(spacing: 0) {
                     DetailInfoRow(label: "Child", value: artwork.childName)
+                    DetailInfoRow(label: "Creation Time", value: work.createdAroundLabel)
+                    DetailInfoRow(label: "Captured", value: work.capturedAt.formatted(date: .abbreviated, time: .shortened))
                     DetailInfoRow(label: "Date", value: artwork.artworkDate ?? artwork.dateNote ?? artwork.createdAroundLabel)
                     DetailInfoRow(label: "Batch", value: artwork.batchName)
                     DetailInfoRow(label: "Type", value: artwork.workType)
@@ -222,13 +227,10 @@ struct ArtworkDetailView: View {
         if let width = artwork.width, let height = artwork.height {
             return "\(width) x \(height)"
         }
-        guard let path = work.originalPath,
-              let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-              let image = UIImage(data: data)
-        else {
-            return nil
+        if let width = work.pixelWidth, let height = work.pixelHeight {
+            return "\(width) x \(height)"
         }
-        return "\(Int(image.size.width)) × \(Int(image.size.height))"
+        return nil
     }
 
     private var fileName: String? {
@@ -418,6 +420,7 @@ struct ArtworkEditorView: View {
     @State private var title: String
     @State private var note: String
     @State private var childQuote: String
+    @State private var creationTimeDraft: CreationTimeDraft
     @State private var showDeleteConfirmation = false
     var onSave: (LocalWork) -> Void
     var onDelete: () -> Void
@@ -429,6 +432,7 @@ struct ArtworkEditorView: View {
         _title = State(initialValue: work.title ?? "")
         _note = State(initialValue: work.note ?? "")
         _childQuote = State(initialValue: work.childQuote ?? "")
+        _creationTimeDraft = State(initialValue: CreationTimeDraft(work: work))
     }
 
     var body: some View {
@@ -451,6 +455,13 @@ struct ArtworkEditorView: View {
                 }
 
                 Section {
+                    CreationTimePicker(title: "This work was made around", draft: $creationTimeDraft)
+                        .listRowInsets(EdgeInsets(top: 10, leading: 0, bottom: 10, trailing: 0))
+                } header: {
+                    Label("Creation Time", systemImage: "calendar")
+                }
+
+                Section {
                     Button(role: .destructive) {
                         showDeleteConfirmation = true
                     } label: {
@@ -467,6 +478,7 @@ struct ArtworkEditorView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
                         session.updateWork(work, title: title, note: note, childQuote: childQuote)
+                        session.updateCreationTime(work, createdAround: creationTimeDraft.input)
                         work.title = title.isEmpty ? nil : title
                         work.note = note.isEmpty ? nil : note
                         work.childQuote = childQuote.isEmpty ? nil : childQuote

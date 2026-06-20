@@ -1,15 +1,30 @@
 import AVFoundation
+import ImageIO
 import SwiftUI
 import UIKit
 
+struct CapturedImagePayload {
+    var originalData: Data
+    var previewData: Data?
+}
+
 struct StackCameraView: UIViewControllerRepresentable {
-    var onCapture: (Data) -> Void
+    var onCapture: (CapturedImagePayload) -> Void
+    var onDone: (Int) -> Void = { _ in }
+    var onCancel: () -> Void = {}
     @Environment(\.dismiss) private var dismiss
 
     func makeUIViewController(context: Context) -> StackCameraViewController {
         let controller = StackCameraViewController()
         controller.onCapture = onCapture
-        controller.onClose = { dismiss() }
+        controller.onDone = { capturedCount in
+            onDone(capturedCount)
+            dismiss()
+        }
+        controller.onCancel = {
+            onCancel()
+            dismiss()
+        }
         return controller
     }
 
@@ -17,8 +32,9 @@ struct StackCameraView: UIViewControllerRepresentable {
 }
 
 final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDelegate {
-    var onCapture: ((Data) -> Void)?
-    var onClose: (() -> Void)?
+    var onCapture: ((CapturedImagePayload) -> Void)?
+    var onDone: ((Int) -> Void)?
+    var onCancel: (() -> Void)?
 
     private let captureSession = AVCaptureSession()
     private let photoOutput = AVCapturePhotoOutput()
@@ -33,6 +49,7 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
     private var isSessionReady = false
     private var isCapturing = false
     private var pendingCapture = false
+    private var pendingDone = false
     private var flashOn = false
 
     // Guide frame + focus controls
@@ -129,7 +146,7 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
         doneConfig.cornerStyle = .capsule
         doneConfig.contentInsets = NSDirectionalEdgeInsets(top: 9, leading: 16, bottom: 9, trailing: 16)
         doneButton.configuration = doneConfig
-        doneButton.addTarget(self, action: #selector(close), for: .touchUpInside)
+        doneButton.addTarget(self, action: #selector(done), for: .touchUpInside)
 
         shutter.backgroundColor = .clear
         shutter.layer.cornerRadius = 36
@@ -404,13 +421,26 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
         photoOutput.capturePhoto(with: settings, delegate: self)
     }
 
-    @objc private func close() {
+    @objc private func done() {
+        guard !isCapturing else {
+            pendingDone = true
+            return
+        }
         sessionQueue.async { [captureSession] in
             if captureSession.isRunning {
                 captureSession.stopRunning()
             }
         }
-        onClose?()
+        onDone?(capturedCount)
+    }
+
+    private func cancel() {
+        sessionQueue.async { [captureSession] in
+            if captureSession.isRunning {
+                captureSession.stopRunning()
+            }
+        }
+        onCancel?()
     }
 
     @objc private func toggleFlash() {
@@ -435,7 +465,7 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
         }
     }
 
-    private static func generatePreview(from data: Data) -> UIImage? {
+    private static func generatePreview(from data: Data) -> Data? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -443,22 +473,22 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
             kCGImageSourceCreateThumbnailWithTransform: true
         ]
         guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
-        return UIImage(cgImage: cgImage)
+        return UIImage(cgImage: cgImage).jpegData(compressionQuality: 0.78)
     }
 
     @MainActor
-    private func completeCapture(jpeg: Data, preview image: UIImage?) {
+    private func completeCapture(jpeg: Data, preview previewData: Data?) {
         capturedCount += 1
         countBadge.text = "\(capturedCount)"
         countBadge.alpha = 1
-        if let image {
+        if let previewData, let image = UIImage(data: previewData) {
             updatePreview(image)
         }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         finishCapture()
         let onCapture = onCapture
         DispatchQueue.main.async {
-            onCapture?(jpeg)
+            onCapture?(CapturedImagePayload(originalData: jpeg, previewData: previewData))
         }
     }
 
@@ -466,6 +496,10 @@ final class StackCameraViewController: UIViewController, AVCapturePhotoCaptureDe
     private func finishCapture() {
         isCapturing = false
         setShutterEnabled(isSessionReady)
+        if pendingDone {
+            pendingDone = false
+            done()
+        }
     }
 
     private func updatePreview(_ image: UIImage) {

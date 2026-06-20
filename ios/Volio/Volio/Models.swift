@@ -27,6 +27,16 @@ final class LocalProfile {
         return "Age \(age)"
     }
 
+    var birthDate: Date? {
+        guard let birthYear else { return nil }
+        let month = birthMonth ?? 6
+        var birth = DateComponents()
+        birth.year = birthYear
+        birth.month = month
+        birth.day = 1
+        return Calendar.current.date(from: birth)
+    }
+
     init(id: String = UUID().uuidString, name: String? = nil, birthYear: Int? = nil, birthMonth: Int? = nil) {
         self.id = id
         self.name = name
@@ -35,13 +45,7 @@ final class LocalProfile {
     }
 
     func ageMonths(at date: Date) -> Int? {
-        guard let birthYear else { return nil }
-        let month = birthMonth ?? 6
-        var birth = DateComponents()
-        birth.year = birthYear
-        birth.month = month
-        birth.day = 1
-        guard let birthDate = Calendar.current.date(from: birth), date >= birthDate else { return nil }
+        guard let birthDate, date >= birthDate else { return nil }
         let comps = Calendar.current.dateComponents([.month], from: birthDate, to: date)
         return comps.month
     }
@@ -62,14 +66,26 @@ final class VolioSession {
     var isShowingDetail = false
 
     private var modelContext: ModelContext?
+    private var didSetup = false
+    private var isRefreshingMacLibrary = false
+    private var deferredRefreshTask: Task<Void, Never>?
+    private var macCopyFlushTask: Task<Void, Never>?
+    private var pendingMacCopyIDs = Set<String>()
 
     func setup(context: ModelContext) {
+        if didSetup {
+            modelContext = context
+            return
+        }
+        VolioPerformance.begin("app_setup")
+        didSetup = true
         modelContext = context
         refreshStoredPairing()
         loadFromSwiftData()
         if isMacPaired {
-            Task { await refreshMacLibrary() }
+            requestMacLibraryRefresh(delayNanoseconds: 700_000_000)
         }
+        VolioPerformance.end("app_setup")
     }
 
     // MARK: - Local CRUD
@@ -78,13 +94,15 @@ final class VolioSession {
     func createWork(
         data: Data,
         workType: String = "paper",
-        createdAround: CreatedAroundInput = .capturedDate,
+        createdAround: CreatedAroundInput = .unknown,
         autoProcess: Bool = true
     ) -> LocalWork {
         let id = UUID().uuidString
         let originalPath = ImageStorage.saveOriginal(id: id, data: data)
+        let metadata = ImageStorage.imageMetadata(from: data)
         let capturedAt = Date()
         let normalized = createdAround.normalized(profile: profile, capturedAt: capturedAt)
+        let descriptor = createdAround.descriptor(profile: profile, capturedAt: capturedAt)
 
         let work = LocalWork(
             id: id,
@@ -99,13 +117,22 @@ final class VolioSession {
             createdAroundAgeMonths: normalized.ageMonths,
             ageAtCreationMonths: normalized.ageMonths,
             originalPath: originalPath,
-            thumbnailPath: originalPath
+            thumbnailPath: nil,
+            pixelWidth: metadata.pixelWidth,
+            pixelHeight: metadata.pixelHeight
         )
-        let originalAsset = LocalAsset(workId: id, role: "original", localPath: originalPath)
-        let thumbnailAsset = LocalAsset(workId: id, role: "thumbnail", localPath: originalPath)
+        work.applyCreationTime(descriptor, markUpdated: false)
+        let originalChecksum = ImageStorage.stableDataChecksum(data)
+        let originalAsset = LocalAsset(
+            workId: id,
+            role: "original",
+            localPath: originalPath,
+            width: metadata.pixelWidth,
+            height: metadata.pixelHeight,
+            checksum: originalChecksum
+        )
         modelContext?.insert(work)
         modelContext?.insert(originalAsset)
-        modelContext?.insert(thumbnailAsset)
         works.insert(work, at: 0)
         try? modelContext?.save()
 
@@ -114,14 +141,101 @@ final class VolioSession {
             let thumbPath = ImageStorage.saveThumbnail(id: id, data: thumbData)
             Task { @MainActor in
                 work.thumbnailPath = thumbPath
-                thumbnailAsset.localPath = thumbPath
+                let thumbnailAsset = LocalAsset(
+                    workId: id,
+                    role: "thumbnail",
+                    localPath: thumbPath,
+                    width: metadata.pixelWidth,
+                    height: metadata.pixelHeight,
+                    checksum: originalChecksum
+                )
+                self.modelContext?.insert(thumbnailAsset)
                 try? self.modelContext?.save()
             }
         }
 
         if autoProcess {
-            syncMacLibraryCopy(for: work, data: data)
+            enqueueMacLibraryCopy(for: work)
             enqueueMacProcessing(for: work, assetIds: [originalAsset.id], data: data)
+        }
+        return work
+    }
+
+    @discardableResult
+    func createWorkAsync(
+        data: Data,
+        previewData: Data? = nil,
+        workType: String = "paper",
+        createdAround: CreatedAroundInput = .unknown,
+        autoProcess: Bool = true
+    ) async -> LocalWork {
+        let ingested = await ImageIngestService.shared.ingest(data: data, previewData: previewData)
+        return insertIngestedWork(
+            ingested,
+            workType: workType,
+            createdAround: createdAround,
+            autoProcess: autoProcess,
+            processingData: data
+        )
+    }
+
+    @discardableResult
+    private func insertIngestedWork(
+        _ ingested: IngestedImage,
+        workType: String,
+        createdAround: CreatedAroundInput,
+        autoProcess: Bool,
+        processingData: Data?
+    ) -> LocalWork {
+        let capturedAt = Date()
+        let normalized = createdAround.normalized(profile: profile, capturedAt: capturedAt)
+        let descriptor = createdAround.descriptor(profile: profile, capturedAt: capturedAt)
+        let work = LocalWork(
+            id: ingested.workID,
+            createdAt: Date(),
+            capturedAt: capturedAt,
+            creatorId: profile.id,
+            workType: workType,
+            createdAroundKind: normalized.kind,
+            createdAroundYear: normalized.year,
+            createdAroundMonth: normalized.month,
+            createdAroundSeason: normalized.season,
+            createdAroundAgeMonths: normalized.ageMonths,
+            ageAtCreationMonths: normalized.ageMonths,
+            originalPath: ingested.originalPath,
+            thumbnailPath: ingested.thumbnailPath,
+            pixelWidth: ingested.pixelWidth,
+            pixelHeight: ingested.pixelHeight
+        )
+        work.applyCreationTime(descriptor, markUpdated: false)
+        let originalAsset = LocalAsset(
+            workId: work.id,
+            role: "original",
+            localPath: ingested.originalPath,
+            width: ingested.pixelWidth,
+            height: ingested.pixelHeight,
+            checksum: ingested.checksum
+        )
+        modelContext?.insert(work)
+        modelContext?.insert(originalAsset)
+        if let thumbnailPath = ingested.thumbnailPath {
+            modelContext?.insert(LocalAsset(
+                workId: work.id,
+                role: "thumbnail",
+                localPath: thumbnailPath,
+                width: ingested.pixelWidth,
+                height: ingested.pixelHeight,
+                checksum: ingested.checksum
+            ))
+        }
+        works.insert(work, at: 0)
+        try? modelContext?.save()
+
+        if autoProcess {
+            enqueueMacLibraryCopy(for: work)
+            if let processingData {
+                enqueueMacProcessing(for: work, assetIds: [originalAsset.id], data: processingData)
+            }
         }
         return work
     }
@@ -153,27 +267,90 @@ final class VolioSession {
         pushWorkMetadataToMac(work)
     }
 
+    func updateCreationTime(_ work: LocalWork, createdAround: CreatedAroundInput) {
+        let descriptor = createdAround.descriptor(profile: profile, capturedAt: work.capturedAt)
+        work.applyCreationTime(descriptor)
+        work.snoozedUntil = nil
+        try? modelContext?.save()
+        pushWorkMetadataToMac(work)
+    }
+
+    func updateCreationTime(workIDs: [String], createdAround: CreatedAroundInput, overrides: [String: CreatedAroundInput] = [:]) {
+        for id in workIDs {
+            guard let work = works.first(where: { $0.id == id }) else { continue }
+            let input = overrides[id] ?? createdAround
+            let descriptor = input.descriptor(profile: profile, capturedAt: work.capturedAt)
+            work.applyCreationTime(descriptor)
+            work.snoozedUntil = nil
+        }
+        try? modelContext?.save()
+        for id in workIDs {
+            if let work = works.first(where: { $0.id == id }) {
+                pushWorkMetadataToMac(work)
+            }
+        }
+    }
+
+    func markWorksSurfaced(_ workIDs: [String]) {
+        guard !workIDs.isEmpty else { return }
+        let now = Date()
+        for id in workIDs {
+            guard let work = works.first(where: { $0.id == id }) else { continue }
+            work.lastSurfacedAt = now
+            work.surfaceCount += 1
+        }
+        try? modelContext?.save()
+    }
+
+    func snoozeUnplacedWork(_ work: LocalWork, days: Int = 14) {
+        work.snoozedUntil = Calendar.current.date(byAdding: .day, value: days, to: Date())
+        work.lastSurfacedAt = Date()
+        work.surfaceCount += 1
+        work.localUpdatedAt = Date()
+        try? modelContext?.save()
+    }
+
+    func restoreCreationTime(_ work: LocalWork, snapshot: CreationTimeSnapshot) {
+        snapshot.restore(to: work)
+        try? modelContext?.save()
+        pushWorkMetadataToMac(work)
+    }
+
     func retryProcessing(_ work: LocalWork) {
-        guard let path = work.originalPath, let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
+        guard let path = work.originalPath else {
             errorMessage = "Original image is missing."
             return
         }
-        enqueueMacProcessing(for: work, assetIds: [], data: data, isRetry: true)
+        Task {
+            guard let data = await ImageIngestService.shared.data(at: path) else {
+                errorMessage = "Original image is missing."
+                return
+            }
+            enqueueMacProcessing(for: work, assetIds: [], data: data, isRetry: true)
+        }
     }
 
     // MARK: - SwiftData
 
     private func loadFromSwiftData() {
         guard let context = modelContext else { return }
+        VolioPerformance.begin("swiftdata_fetch")
         let descriptor = FetchDescriptor<LocalWork>(sortBy: [SortDescriptor(\.capturedAt, order: .reverse)])
         works = (try? context.fetch(descriptor)) ?? []
         let jobDescriptor = FetchDescriptor<LocalProcessingJob>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
         processingJobs = (try? context.fetch(jobDescriptor)) ?? []
-        migrateLegacyAssetsIfNeeded(context: context)
+        VolioPerformance.end("swiftdata_fetch")
+        if localMigrationVersion < targetLocalMigrationVersion {
+            migrateLegacyAssetsIfNeeded(context: context)
+            localMigrationVersion = targetLocalMigrationVersion
+        }
     }
 
     private func migrateLegacyAssetsIfNeeded(context: ModelContext) {
+        VolioPerformance.begin("legacy_migration")
         var didChange = false
+        let allAssets = (try? context.fetch(FetchDescriptor<LocalAsset>())) ?? []
+        let assetsByWorkID = Dictionary(grouping: allAssets, by: \.workId)
         for work in works {
             if work.localUpdatedAt == nil {
                 work.localUpdatedAt = work.createdAt
@@ -183,18 +360,26 @@ final class VolioSession {
                 work.creatorId = profile.id
                 didChange = true
             }
-            let workId = work.id
-            let assetDescriptor = FetchDescriptor<LocalAsset>(
-                predicate: #Predicate { $0.workId == workId }
-            )
-            let existing = (try? context.fetch(assetDescriptor)) ?? []
+            let existing = assetsByWorkID[work.id] ?? []
             if existing.isEmpty {
                 if let path = work.originalPath {
-                    context.insert(LocalAsset(workId: work.id, role: "original", localPath: path))
+                    context.insert(LocalAsset(
+                        workId: work.id,
+                        role: "original",
+                        localPath: path,
+                        width: work.pixelWidth,
+                        height: work.pixelHeight
+                    ))
                     didChange = true
                 }
                 if let path = work.thumbnailPath {
-                    context.insert(LocalAsset(workId: work.id, role: "thumbnail", localPath: path))
+                    context.insert(LocalAsset(
+                        workId: work.id,
+                        role: "thumbnail",
+                        localPath: path,
+                        width: work.pixelWidth,
+                        height: work.pixelHeight
+                    ))
                     didChange = true
                 }
             }
@@ -202,10 +387,14 @@ final class VolioSession {
                 work.createdAroundKind = "captured_date"
                 didChange = true
             }
+            if work.ensureFuzzyTimelineFields(profile: profile) {
+                didChange = true
+            }
         }
         if didChange {
             try? context.save()
         }
+        VolioPerformance.end("legacy_migration")
     }
 
     // MARK: - Mac Assist (optional)
@@ -213,6 +402,8 @@ final class VolioSession {
     @ObservationIgnored @AppStorage("volio.baseURL") private var storedBaseURL = ""
     @ObservationIgnored @AppStorage("volio.token") private var storedToken = ""
     @ObservationIgnored @AppStorage("volio.hostName") private var storedHostName = ""
+    @ObservationIgnored @AppStorage("volio.localMigrationVersion") private var localMigrationVersion = 0
+    private let targetLocalMigrationVersion = 2
 
     var isMacPaired: Bool {
         !pairedBaseURL.isEmpty && !pairedToken.isEmpty
@@ -225,7 +416,7 @@ final class VolioSession {
         storedToken = payload.token
         storedHostName = payload.hostName ?? URL(string: payload.baseURL)?.host ?? "Volio Desktop"
         refreshStoredPairing()
-        Task { await refreshMacLibrary() }
+        requestMacLibraryRefresh(delayNanoseconds: 250_000_000)
     }
 
     func forgetMac() {
@@ -250,12 +441,15 @@ final class VolioSession {
     func refreshLibrary(showError: Bool = false) async {
         loadFromSwiftData()
         if isMacPaired {
-            await refreshMacLibrary(showError: showError)
+            await refreshMacLibrary(showError: showError, force: true)
         }
     }
 
-    func refreshMacLibrary(showError: Bool = false) async {
+    func refreshMacLibrary(showError: Bool = false, force: Bool = false) async {
         guard let client = macClient else { return }
+        if isRefreshingMacLibrary, !force { return }
+        isRefreshingMacLibrary = true
+        defer { isRefreshingMacLibrary = false }
         do {
             let bootstrap = try await client.bootstrap()
             macArtworks = bootstrap.artworks
@@ -264,6 +458,16 @@ final class VolioSession {
             if showError {
                 errorMessage = "Could not reach Volio Desktop."
             }
+        }
+    }
+
+    func requestMacLibraryRefresh(delayNanoseconds: UInt64 = 900_000_000) {
+        guard isMacPaired else { return }
+        deferredRefreshTask?.cancel()
+        deferredRefreshTask = Task(priority: .utility) { [weak self] in
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
+            guard !Task.isCancelled else { return }
+            await self?.refreshMacLibrary()
         }
     }
 
@@ -287,10 +491,36 @@ final class VolioSession {
             try? modelContext?.save()
             return
         }
+        let idempotencyKey = Self.processingIdempotencyKey(work: work, assetIds: assetIds, data: data)
+        if let existing = processingJobs.first(where: { job in
+            job.processorKind == "mac" &&
+            job.idempotencyKey == idempotencyKey &&
+            ["pending", "queued", "uploading", "processing", "succeeded", "complete"].contains(job.status)
+        }) {
+            work.processingStatus = existing.status == "complete" ? "succeeded" : existing.status
+            work.processorSource = "mac"
+            try? modelContext?.save()
+            return
+        }
+        if !isRetry,
+           processingJobs.contains(where: { job in
+               job.processorKind == "mac" &&
+               job.idempotencyKey == idempotencyKey &&
+               job.status == "failed"
+           }) {
+            work.processingStatus = "failed"
+            try? modelContext?.save()
+            return
+        }
         work.processingStatus = "queued"
         work.processorSource = "mac"
         work.processingError = nil
-        let job = LocalProcessingJob(workId: work.id, assetIds: assetIds.joined(separator: ","), status: "queued")
+        let job = LocalProcessingJob(
+            workId: work.id,
+            assetIds: assetIds.joined(separator: ","),
+            idempotencyKey: idempotencyKey,
+            status: "queued"
+        )
         if isRetry {
             job.retryCount += 1
         }
@@ -303,34 +533,91 @@ final class VolioSession {
         }
     }
 
-    private func syncMacLibraryCopy(for work: LocalWork, data: Data) {
-        guard isMacPaired, let client = macClient else { return }
-        Task {
+    func flushMacSyncBatch() {
+        macCopyFlushTask?.cancel()
+        macCopyFlushTask = Task(priority: .utility) { [weak self] in
+            await self?.flushPendingMacCopies()
+        }
+    }
+
+    private func enqueueMacLibraryCopy(for work: LocalWork) {
+        guard isMacPaired else { return }
+        pendingMacCopyIDs.insert(work.id)
+        macCopyFlushTask?.cancel()
+        macCopyFlushTask = Task(priority: .utility) { [weak self] in
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.flushPendingMacCopies()
+        }
+    }
+
+    private func flushPendingMacCopies() async {
+        guard isMacPaired, let client = macClient, !pendingMacCopyIDs.isEmpty else { return }
+        VolioPerformance.begin("mac_batch_sync")
+        let ids = Array(pendingMacCopyIDs)
+        pendingMacCopyIDs.removeAll()
+
+        var groups: [String: MacCopyBatch] = [:]
+        for id in ids {
+            guard let work = works.first(where: { $0.id == id }),
+                  work.remoteArtworkId == nil,
+                  let path = work.originalPath,
+                  let data = await ImageIngestService.shared.data(at: path)
+            else { continue }
+            let metadata = macImportMetadata(for: work)
+            let key = [
+                metadata.date,
+                metadata.precision,
+                metadata.note,
+                metadata.ageMonths.map(String.init) ?? "",
+                work.workType
+            ].joined(separator: "\u{1F}")
+            if groups[key] == nil {
+                groups[key] = MacCopyBatch(metadata: metadata, workType: work.workType)
+            }
+            groups[key]?.items.append(MacCopyItem(work: work, data: data))
+        }
+
+        for batch in groups.values {
             do {
-                let metadata = macImportMetadata(for: work)
                 let response = try await client.importPhotos(
-                    [ImportPhoto(data: data, filename: "\(work.id).jpg")],
+                    batch.items.map { ImportPhoto(data: $0.data, filename: "\($0.work.id).jpg") },
                     childId: nil,
                     childName: profile.name?.isEmpty == false ? profile.name! : "Creator",
                     batchName: "iPhone Capture",
-                    artworkDate: metadata.date,
-                    datePrecision: metadata.precision,
-                    dateNote: metadata.note,
-                    childAgeMonths: work.createdAroundAgeMonths ?? work.ageAtCreationMonths,
-                    workType: work.workType,
-                    autoAnalyze: true,
-                    clientWorkId: work.id
+                    artworkDate: batch.metadata.date,
+                    datePrecision: batch.metadata.precision,
+                    dateNote: batch.metadata.note,
+                    childAgeMonths: batch.metadata.ageMonths,
+                    workType: batch.workType,
+                    autoAnalyze: false,
+                    clientWorkId: batch.items.count == 1 ? batch.items.first?.work.id : nil,
+                    clientWorkIds: batch.items.map { $0.work.id }
                 )
-                if let imported = response.imported.first {
-                    work.remoteArtworkId = imported.id
-                    work.lastSyncedAt = Date()
+                let importedByClientID = Dictionary(uniqueKeysWithValues: response.imported.compactMap { item -> (String, ImportedArtwork)? in
+                    guard let clientWorkId = item.clientWorkId, !clientWorkId.isEmpty else { return nil }
+                    return (clientWorkId, item)
+                })
+                for (index, item) in batch.items.enumerated() {
+                    let imported = importedByClientID[item.work.id] ?? (response.imported.indices.contains(index) ? response.imported[index] : nil)
+                    guard let imported else { continue }
+                    item.work.remoteArtworkId = imported.id
+                    item.work.remoteUpdatedAt = nil
+                    item.work.localUpdatedAt = item.work.localUpdatedAt ?? item.work.createdAt
+                    item.work.processingError = nil
+                    item.work.lastSyncedAt = Date()
+                }
+                if !batch.items.isEmpty {
                     try? modelContext?.save()
                 }
-                await refreshMacLibrary()
             } catch {
-                // Local capture is the source of truth; Mac sync can retry through the next capture or manual refresh.
+                for item in batch.items {
+                    pendingMacCopyIDs.insert(item.work.id)
+                }
             }
         }
+        requestMacLibraryRefresh(delayNanoseconds: 250_000_000)
+        VolioPerformance.end("mac_batch_sync")
     }
 
     private func pushWorkMetadataToMac(_ work: LocalWork) {
@@ -352,14 +639,14 @@ final class VolioSession {
                 if !metadata.date.isEmpty {
                     patch["artwork_date"] = .string(metadata.date)
                 }
-                if let months = work.createdAroundAgeMonths ?? work.ageAtCreationMonths {
+                if let months = metadata.ageMonths {
                     patch["child_age_months"] = .int(months)
                 }
                 let remote = try await client.updateArtwork(id: remoteId, patch: patch)
                 work.remoteUpdatedAt = remote.updatedAt
                 work.lastSyncedAt = Date()
                 try? modelContext?.save()
-                await refreshMacLibrary()
+                requestMacLibraryRefresh(delayNanoseconds: 600_000_000)
             } catch {
                 work.processingError = "Mac sync failed. Changes are saved on this iPhone."
                 try? modelContext?.save()
@@ -420,8 +707,11 @@ final class VolioSession {
             return
         }
 
-        work.originalPath = ImageStorage.saveOriginal(id: work.id, data: data)
-        work.thumbnailPath = ImageStorage.saveThumbnail(id: work.id, data: ImageStorage.generateThumbnail(from: data))
+        let ingested = await ImageIngestService.shared.ingest(data: data, workID: work.id)
+        work.originalPath = ingested.originalPath
+        work.thumbnailPath = ingested.thumbnailPath
+        work.pixelWidth = ingested.pixelWidth
+        work.pixelHeight = ingested.pixelHeight
     }
 
     private func shouldApplyRemote(_ remote: Artwork, to local: LocalWork) -> Bool {
@@ -443,6 +733,8 @@ final class VolioSession {
         if let medium = remote.medium { local.aiMaterials = medium }
         if let workType = remote.workType { local.workType = workType }
         if let physicalStatus = remote.physicalStatus { local.physicalStatus = physicalStatus }
+        local.pixelWidth = remote.width ?? local.pixelWidth
+        local.pixelHeight = remote.height ?? local.pixelHeight
         local.isFavorite = remote.isFavorite?.boolValue ?? local.isFavorite
         local.isRepresentative = remote.isRepresentative?.boolValue ?? local.isRepresentative
         local.remoteUpdatedAt = remote.updatedAt
@@ -454,7 +746,7 @@ final class VolioSession {
             errorMessage = "Could not download an image from Volio Desktop."
             return
         }
-        let work = createWork(
+        let work = await createWorkAsync(
             data: data,
             workType: remote.workType ?? "artwork",
             createdAround: createdAroundInput(from: remote),
@@ -488,8 +780,32 @@ final class VolioSession {
         if let months = remote.childAgeMonths {
             return .ageYears(max(0, months) / 12)
         }
-        if let date = remote.artworkDate, let year = Int(date.prefix(4)) {
+        let precision = remote.datePrecision?.lowercased()
+        let dateText = remote.artworkDate ?? ""
+        if precision == "date",
+           let date = Self.dayFormatter.date(from: dateText) {
+            return .exactDate(date)
+        }
+        if precision == "month",
+           dateText.count >= 7,
+           let year = Int(dateText.prefix(4)),
+           let month = Int(dateText.dropFirst(5).prefix(2)) {
+            return .yearMonth(year, month)
+        }
+        if precision == "season",
+           let year = Int(dateText.prefix(4)),
+           let season = remote.dateNote?.lowercased(),
+           !season.isEmpty {
+            return .season(season, year)
+        }
+        if let year = Int(dateText.prefix(4)) {
             return .year(year)
+        }
+        if let note = remote.dateNote?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !note.isEmpty,
+           note.lowercased() != "date unknown" {
+            let id = note.lowercased().replacingOccurrences(of: " ", with: "_")
+            return .lifeStage(id, note)
         }
         return .unknown
     }
@@ -513,20 +829,37 @@ final class VolioSession {
         return ISO8601DateFormatter().date(from: value)
     }
 
-    private func macImportMetadata(for work: LocalWork) -> (date: String, precision: String, note: String) {
-        if work.createdAroundKind == "age" {
-            return ("", "age", work.createdAroundLabel)
+    private func macImportMetadata(for work: LocalWork) -> (date: String, precision: String, note: String, ageMonths: Int?) {
+        switch work.creationTimeKind {
+        case .capturedDate:
+            return (Self.dayFormatter.string(from: work.capturedAt), "date", "Recently made", work.createdAroundAgeMonths ?? work.ageAtCreationMonths)
+        case .exactDate:
+            let date = work.creationDateStart ?? work.capturedAt
+            return (Self.dayFormatter.string(from: date), "date", work.customTimeLabel ?? "", work.creationAgeStartMonths ?? work.createdAroundAgeMonths ?? work.ageAtCreationMonths)
+        case .yearMonth:
+            if let year = work.creationYear ?? work.createdAroundYear,
+               let month = work.creationMonth ?? work.createdAroundMonth {
+                return (String(format: "%04d-%02d", year, month), "month", work.customTimeLabel ?? "", nil)
+            }
+        case .season:
+            if let year = work.creationYear ?? work.createdAroundYear,
+               let season = work.creationSeasonRaw ?? work.createdAroundSeason {
+                return ("\(year)", "season", season.capitalized, nil)
+            }
+        case .year:
+            if let year = work.creationYear ?? work.createdAroundYear {
+                return ("\(year)", "year", work.customTimeLabel ?? "", nil)
+            }
+        case .age:
+            return ("", "age", work.createdAroundLabel, work.creationAgeStartMonths ?? work.createdAroundAgeMonths ?? work.ageAtCreationMonths)
+        case .ageRange:
+            return ("", "age", work.createdAroundLabel, work.creationAgeStartMonths ?? work.createdAroundAgeMonths ?? work.ageAtCreationMonths)
+        case .lifeStage:
+            return ("", "unknown", work.createdAroundLabel, nil)
+        case .relative, .unknown:
+            break
         }
-        if work.createdAroundKind == "season", let year = work.createdAroundYear, let season = work.createdAroundSeason {
-            return ("\(year)", "season", season.capitalized)
-        }
-        if work.createdAroundKind == "year", let year = work.createdAroundYear {
-            return ("\(year)", "year", "")
-        }
-        if work.createdAroundKind == "unknown" {
-            return ("", "unknown", "Date unknown")
-        }
-        return (Self.dayFormatter.string(from: work.capturedAt), "day", "")
+        return ("", "unknown", "Date unknown", nil)
     }
 
     private static let dayFormatter: DateFormatter = {
@@ -611,13 +944,36 @@ final class VolioSession {
         let text = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return text.isEmpty ? nil : text
     }
+
+    private static func processingIdempotencyKey(work: LocalWork, assetIds _: [String], data: Data) -> String {
+        return [
+            work.id,
+            ImageStorage.stableDataChecksum(data),
+            "analysis-v1"
+        ].joined(separator: ":")
+    }
+}
+
+private struct MacCopyItem {
+    var work: LocalWork
+    var data: Data
+}
+
+private struct MacCopyBatch {
+    var metadata: (date: String, precision: String, note: String, ageMonths: Int?)
+    var workType: String
+    var items: [MacCopyItem] = []
 }
 
 enum CreatedAroundInput: Equatable {
     case capturedDate
+    case exactDate(Date)
+    case yearMonth(Int, Int)
     case year(Int)
     case season(String, Int)
     case ageYears(Int)
+    case ageRange(Int, Int)
+    case lifeStage(String, String)
     case unknown
 
     func normalized(profile: LocalProfile, capturedAt: Date) -> CreatedAroundNormalized {
@@ -631,15 +987,211 @@ enum CreatedAroundInput: Equatable {
                 season: nil,
                 ageMonths: profile.ageMonths(at: capturedAt)
             )
+        case .exactDate(let date):
+            let comps = Calendar.current.dateComponents([.year, .month], from: date)
+            return CreatedAroundNormalized(
+                kind: "exact_date",
+                year: comps.year,
+                month: comps.month,
+                season: nil,
+                ageMonths: profile.ageMonths(at: date)
+            )
+        case .yearMonth(let year, let month):
+            return CreatedAroundNormalized(kind: "year_month", year: year, month: month, season: nil, ageMonths: nil)
         case .year(let year):
             return CreatedAroundNormalized(kind: "year", year: year, month: nil, season: nil, ageMonths: nil)
         case .season(let season, let year):
             return CreatedAroundNormalized(kind: "season", year: year, month: nil, season: season, ageMonths: nil)
         case .ageYears(let years):
             return CreatedAroundNormalized(kind: "age", year: nil, month: nil, season: nil, ageMonths: years * 12)
+        case .ageRange(let start, let end):
+            return CreatedAroundNormalized(kind: "age_range", year: nil, month: nil, season: nil, ageMonths: start * 12)
+        case .lifeStage:
+            return CreatedAroundNormalized(kind: "life_stage", year: nil, month: nil, season: nil, ageMonths: nil)
         case .unknown:
             return CreatedAroundNormalized(kind: "unknown", year: nil, month: nil, season: nil, ageMonths: nil)
         }
+    }
+
+    func descriptor(profile: LocalProfile, capturedAt: Date) -> CreationTimeDescriptor {
+        switch self {
+        case .capturedDate:
+            let start = Calendar.current.startOfDay(for: capturedAt)
+            let end = Calendar.current.date(byAdding: DateComponents(day: 1, second: -1), to: start)
+            let comps = Calendar.current.dateComponents([.year, .month], from: capturedAt)
+            return CreationTimeDescriptor(
+                kind: .capturedDate,
+                dateStart: start,
+                dateEnd: end,
+                year: comps.year,
+                month: comps.month,
+                season: nil,
+                ageStartMonths: profile.ageMonths(at: capturedAt),
+                ageEndMonths: profile.ageMonths(at: capturedAt),
+                lifeStageID: nil,
+                label: "Recently made",
+                confidence: .confirmed,
+                placement: .placed,
+                reviewState: .reviewed,
+                sortKey: capturedAt.timeIntervalSince1970
+            )
+        case .exactDate(let date):
+            let start = Calendar.current.startOfDay(for: date)
+            let end = Calendar.current.date(byAdding: DateComponents(day: 1, second: -1), to: start)
+            let comps = Calendar.current.dateComponents([.year, .month], from: date)
+            return CreationTimeDescriptor(
+                kind: .exactDate,
+                dateStart: start,
+                dateEnd: end,
+                year: comps.year,
+                month: comps.month,
+                season: nil,
+                ageStartMonths: profile.ageMonths(at: date),
+                ageEndMonths: profile.ageMonths(at: date),
+                lifeStageID: nil,
+                label: nil,
+                confidence: .confirmed,
+                placement: .placed,
+                reviewState: .reviewed,
+                sortKey: date.timeIntervalSince1970
+            )
+        case .yearMonth(let year, let month):
+            let start = LocalWork.date(year: year, month: month, day: 1)
+            let end = LocalWork.monthEnd(year: year, month: month)
+            return CreationTimeDescriptor(
+                kind: .yearMonth,
+                dateStart: start,
+                dateEnd: end,
+                year: year,
+                month: month,
+                season: nil,
+                ageStartMonths: nil,
+                ageEndMonths: nil,
+                lifeStageID: nil,
+                label: nil,
+                confidence: .approximate,
+                placement: .approximate,
+                reviewState: .reviewed,
+                sortKey: LocalWork.sortKey(dateStart: start, dateEnd: end, ageStartMonths: nil, ageEndMonths: nil, year: year, month: month, capturedAt: capturedAt, placement: .approximate)
+            )
+        case .year(let year):
+            let start = LocalWork.date(year: year, month: 1, day: 1)
+            let end = LocalWork.monthEnd(year: year, month: 12)
+            return CreationTimeDescriptor(
+                kind: .year,
+                dateStart: start,
+                dateEnd: end,
+                year: year,
+                month: nil,
+                season: nil,
+                ageStartMonths: nil,
+                ageEndMonths: nil,
+                lifeStageID: nil,
+                label: nil,
+                confidence: .approximate,
+                placement: .approximate,
+                reviewState: .reviewed,
+                sortKey: LocalWork.sortKey(dateStart: start, dateEnd: end, ageStartMonths: nil, ageEndMonths: nil, year: year, month: nil, capturedAt: capturedAt, placement: .approximate)
+            )
+        case .season(let season, let year):
+            let range = LocalWork.seasonRange(season: season, year: year)
+            return CreationTimeDescriptor(
+                kind: .season,
+                dateStart: range.start,
+                dateEnd: range.end,
+                year: year,
+                month: nil,
+                season: season,
+                ageStartMonths: nil,
+                ageEndMonths: nil,
+                lifeStageID: nil,
+                label: "\(season.capitalized) \(year)",
+                confidence: .approximate,
+                placement: .approximate,
+                reviewState: .reviewed,
+                sortKey: LocalWork.sortKey(dateStart: range.start, dateEnd: range.end, ageStartMonths: nil, ageEndMonths: nil, year: year, month: nil, capturedAt: capturedAt, placement: .approximate)
+            )
+        case .ageYears(let years):
+            let months = years * 12
+            let dates = ageRangeDates(startMonths: months, endMonths: months, profile: profile)
+            return CreationTimeDescriptor(
+                kind: .age,
+                dateStart: dates.start,
+                dateEnd: dates.end,
+                year: nil,
+                month: nil,
+                season: nil,
+                ageStartMonths: months,
+                ageEndMonths: months,
+                lifeStageID: nil,
+                label: "Age \(years)",
+                confidence: .approximate,
+                placement: .approximate,
+                reviewState: .reviewed,
+                sortKey: LocalWork.sortKey(dateStart: dates.start, dateEnd: dates.end, ageStartMonths: months, ageEndMonths: months, year: nil, month: nil, capturedAt: capturedAt, placement: .approximate)
+            )
+        case .ageRange(let start, let end):
+            let startMonths = min(start, end) * 12
+            let endMonths = max(start, end) * 12
+            let dates = ageRangeDates(startMonths: startMonths, endMonths: endMonths, profile: profile)
+            return CreationTimeDescriptor(
+                kind: .ageRange,
+                dateStart: dates.start,
+                dateEnd: dates.end,
+                year: nil,
+                month: nil,
+                season: nil,
+                ageStartMonths: startMonths,
+                ageEndMonths: endMonths,
+                lifeStageID: nil,
+                label: "Around Age \(min(start, end))-\(max(start, end))",
+                confidence: .approximate,
+                placement: .approximate,
+                reviewState: .reviewed,
+                sortKey: LocalWork.sortKey(dateStart: dates.start, dateEnd: dates.end, ageStartMonths: startMonths, ageEndMonths: endMonths, year: nil, month: nil, capturedAt: capturedAt, placement: .approximate)
+            )
+        case .lifeStage(let id, let label):
+            return CreationTimeDescriptor(
+                kind: .lifeStage,
+                dateStart: nil,
+                dateEnd: nil,
+                year: nil,
+                month: nil,
+                season: nil,
+                ageStartMonths: nil,
+                ageEndMonths: nil,
+                lifeStageID: id,
+                label: label,
+                confidence: .approximate,
+                placement: .approximate,
+                reviewState: .reviewed,
+                sortKey: nil
+            )
+        case .unknown:
+            return CreationTimeDescriptor(
+                kind: .unknown,
+                dateStart: nil,
+                dateEnd: nil,
+                year: nil,
+                month: nil,
+                season: nil,
+                ageStartMonths: nil,
+                ageEndMonths: nil,
+                lifeStageID: nil,
+                label: nil,
+                confidence: .unknown,
+                placement: .unplaced,
+                reviewState: .pending,
+                sortKey: nil
+            )
+        }
+    }
+
+    private func ageRangeDates(startMonths: Int, endMonths: Int, profile: LocalProfile) -> (start: Date?, end: Date?) {
+        guard let birthDate = profile.birthDate else { return (nil, nil) }
+        let start = Calendar.current.date(byAdding: .month, value: startMonths, to: birthDate)
+        let end = Calendar.current.date(byAdding: .month, value: endMonths + 12, to: birthDate)
+        return (start, end)
     }
 }
 

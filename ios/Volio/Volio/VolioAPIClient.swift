@@ -63,7 +63,8 @@ struct VolioAPIClient {
         childAgeMonths: Int?,
         workType: String,
         autoAnalyze: Bool,
-        clientWorkId: String? = nil
+        clientWorkId: String? = nil,
+        clientWorkIds: [String]? = nil
     ) async throws -> ImportResponse {
         let boundary = "Boundary-\(UUID().uuidString)"
         var body = Data()
@@ -76,6 +77,7 @@ struct VolioAPIClient {
         body.appendMultipartField(name: "date_note", value: dateNote, boundary: boundary)
         body.appendMultipartField(name: "child_age_months", value: childAgeMonths.map(String.init) ?? "", boundary: boundary)
         body.appendMultipartField(name: "client_work_id", value: clientWorkId ?? "", boundary: boundary)
+        body.appendMultipartField(name: "client_work_ids", value: (clientWorkIds ?? []).joined(separator: ","), boundary: boundary)
         body.appendMultipartField(name: "work_type", value: workType, boundary: boundary)
         body.appendMultipartField(name: "auto_analyze", value: autoAnalyze ? "true" : "false", boundary: boundary)
         for photo in photos {
@@ -100,12 +102,14 @@ struct VolioAPIClient {
         body.appendMultipartField(name: "token", value: token, boundary: boundary)
         body.appendMultipartField(name: "work_id", value: work.id, boundary: boundary)
         body.appendMultipartField(name: "work_type", value: work.workType, boundary: boundary)
-        body.appendMultipartField(name: "created_around_kind", value: work.createdAroundKind, boundary: boundary)
+        body.appendMultipartField(name: "created_around_kind", value: work.creationTimeKind.rawValue, boundary: boundary)
         body.appendMultipartField(name: "created_around_label", value: work.createdAroundLabel, boundary: boundary)
-        body.appendMultipartField(name: "created_around_year", value: work.createdAroundYear.map(String.init) ?? "", boundary: boundary)
-        body.appendMultipartField(name: "created_around_month", value: work.createdAroundMonth.map(String.init) ?? "", boundary: boundary)
-        body.appendMultipartField(name: "created_around_season", value: work.createdAroundSeason ?? "", boundary: boundary)
-        body.appendMultipartField(name: "created_around_age_months", value: work.createdAroundAgeMonths.map(String.init) ?? "", boundary: boundary)
+        body.appendMultipartField(name: "created_around_year", value: (work.creationYear ?? work.createdAroundYear).map(String.init) ?? "", boundary: boundary)
+        body.appendMultipartField(name: "created_around_month", value: (work.creationMonth ?? work.createdAroundMonth).map(String.init) ?? "", boundary: boundary)
+        body.appendMultipartField(name: "created_around_season", value: work.creationSeasonRaw ?? work.createdAroundSeason ?? "", boundary: boundary)
+        body.appendMultipartField(name: "created_around_age_months", value: (work.creationAgeStartMonths ?? work.createdAroundAgeMonths).map(String.init) ?? "", boundary: boundary)
+        body.appendMultipartField(name: "timeline_placement_state", value: work.timelinePlacementStateRaw, boundary: boundary)
+        body.appendMultipartField(name: "review_state", value: work.reviewStateRaw, boundary: boundary)
         body.appendMultipartField(name: "title", value: work.title ?? "", boundary: boundary)
         body.append("--\(boundary)\r\n".data(using: .utf8)!)
         body.append("Content-Disposition: form-data; name=\"file\"; filename=\"\(work.id)-processor.jpg\"\r\n".data(using: .utf8)!)

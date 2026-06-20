@@ -67,6 +67,7 @@ _processor_worker_active = False
 _mobile_sessions: dict[str, dict[str, Any]] = {}
 _ios_pairing_sessions: dict[str, dict[str, Any]] = {}
 MOBILE_TOKEN_TTL = 3600
+MIN_IOS_PAIRING_TOKEN_TTL = 3600
 IOS_PAIRING_TOKEN_TTL = 30 * 24 * 3600
 SUPPORTED_LOCALES = {"en", "zh"}
 DEFAULT_SETTINGS = {
@@ -2640,14 +2641,14 @@ def _purge_expired_ios_tokens() -> None:
     now = time.time()
     expired = [
         token for token, session in _ios_pairing_sessions.items()
-        if now - session["created_at"] > int(session.get("ttl", IOS_PAIRING_TOKEN_TTL))
+        if now - session["created_at"] > max(MIN_IOS_PAIRING_TOKEN_TTL, int(session.get("ttl", IOS_PAIRING_TOKEN_TTL)))
     ]
     for token in expired:
         _ios_pairing_sessions.pop(token, None)
     with connect() as con:
         con.execute(
-            "DELETE FROM ios_pairing_tokens WHERE ? - created_at > ttl",
-            (now,),
+            "DELETE FROM ios_pairing_tokens WHERE ? - created_at > MAX(ttl, ?)",
+            (now, MIN_IOS_PAIRING_TOKEN_TTL),
         )
         con.commit()
 
@@ -2681,7 +2682,7 @@ def _load_ios_pairing_token(token: str) -> dict[str, Any] | None:
         return None
     session = dict(row)
     session["created_at"] = float(session["created_at"])
-    session["ttl"] = int(session.get("ttl") or IOS_PAIRING_TOKEN_TTL)
+    session["ttl"] = max(MIN_IOS_PAIRING_TOKEN_TTL, int(session.get("ttl") or IOS_PAIRING_TOKEN_TTL))
     session["port"] = int(session.get("port") or server_port())
     return session
 
@@ -2698,7 +2699,7 @@ def _require_ios_pairing(request: Request, form_token: str | None = None, mark_s
     if not token or token not in _ios_pairing_sessions:
         raise HTTPException(status_code=401, detail="Pair Volio with Volio Desktop again.")
     session = _ios_pairing_sessions[token]
-    if time.time() - session["created_at"] > int(session.get("ttl", IOS_PAIRING_TOKEN_TTL)):
+    if time.time() - session["created_at"] > max(MIN_IOS_PAIRING_TOKEN_TTL, int(session.get("ttl", IOS_PAIRING_TOKEN_TTL))):
         _ios_pairing_sessions.pop(token, None)
         with connect() as con:
             con.execute("DELETE FROM ios_pairing_tokens WHERE token = ?", (token,))
@@ -2753,7 +2754,7 @@ def create_ios_pairing_session(request: Request) -> dict[str, Any]:
     if not ip:
         raise HTTPException(status_code=503, detail="Cannot detect LAN IP. Connect to Wi-Fi first.")
     token = secrets.token_urlsafe(24)
-    ttl = IOS_PAIRING_TOKEN_TTL
+    ttl = max(MIN_IOS_PAIRING_TOKEN_TTL, IOS_PAIRING_TOKEN_TTL)
     host_name = socket.gethostname()
     port = server_port()
     base_url = f"http://{ip}:{port}"
@@ -2800,7 +2801,8 @@ def create_ios_pairing_session(request: Request) -> dict[str, Any]:
 @app.get("/api/ios/pairing/session/{token}")
 def get_ios_pairing_session(token: str, request: Request) -> dict[str, Any]:
     session = _require_ios_pairing(request, form_token=token, mark_seen=False)
-    remaining = int(session.get("ttl", IOS_PAIRING_TOKEN_TTL)) - int(time.time() - session["created_at"])
+    ttl = max(MIN_IOS_PAIRING_TOKEN_TTL, int(session.get("ttl", IOS_PAIRING_TOKEN_TTL)))
+    remaining = ttl - int(time.time() - session["created_at"])
     return {
         "valid": True,
         "host": session["host"],
@@ -3054,6 +3056,7 @@ def ios_import_images(
     date_note: str = Form(""),
     child_age_months: str = Form(""),
     client_work_id: str = Form(""),
+    client_work_ids: str = Form(""),
     work_type: str = Form("paper"),
     auto_analyze: str = Form("true"),
     files: list[UploadFile] = File(...),
@@ -3063,6 +3066,14 @@ def ios_import_images(
         raise HTTPException(status_code=400, detail="No files uploaded")
     imported: list[dict[str, Any]] = []
     age_months = parse_int(child_age_months)
+    parsed_client_ids: list[str] = []
+    if client_work_ids.strip():
+        try:
+            maybe_ids = json.loads(client_work_ids)
+            if isinstance(maybe_ids, list):
+                parsed_client_ids = [str(value).strip() for value in maybe_ids]
+        except Exception:
+            parsed_client_ids = [value.strip() for value in client_work_ids.split(",")]
     with connect() as con:
         child = None
         if child_id:
@@ -3085,7 +3096,12 @@ def ios_import_images(
         )
         set_pref(con, "last_child_name", child["name"])
         set_pref(con, "last_child_id", child["id"])
-        for file in files:
+        for index, file in enumerate(files):
+            per_file_client_id = None
+            if index < len(parsed_client_ids):
+                per_file_client_id = parsed_client_ids[index] or None
+            elif len(files) == 1:
+                per_file_client_id = client_work_id or None
             imported.append(save_upload(
                 con,
                 file,
@@ -3096,7 +3112,7 @@ def ios_import_images(
                 date_precision or None,
                 age_months,
                 work_type,
-                client_work_id if len(files) == 1 else None,
+                per_file_client_id,
             ))
         con.commit()
     for item in imported:
