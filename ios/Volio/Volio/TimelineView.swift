@@ -52,6 +52,15 @@ struct GalleryView: View {
     @State private var showSettings = false
     @State private var navigationPath = NavigationPath()
 
+    private var galleryWorks: [LocalWork] {
+        session.works.sorted { left, right in
+            if left.capturedAt != right.capturedAt {
+                return left.capturedAt > right.capturedAt
+            }
+            return left.createdAt > right.createdAt
+        }
+    }
+
     var body: some View {
         NavigationStack(path: $navigationPath) {
             ScrollView {
@@ -60,11 +69,11 @@ struct GalleryView: View {
                         headerActions
                     }
 
-                    if session.works.isEmpty {
+                    if galleryWorks.isEmpty {
                         emptyState
                     } else {
                         MasonryGrid(
-                            works: session.works,
+                            works: galleryWorks,
                             onOpenWork: openWork
                         )
                     }
@@ -80,7 +89,7 @@ struct GalleryView: View {
             )
             .toolbar(.hidden, for: .navigationBar)
             .refreshable {
-                await session.refreshLibrary(showError: true)
+                await session.refreshLibrary(showError: false)
             }
             .sheet(isPresented: $showSettings) {
                 NavigationStack { SettingsContent() }
@@ -237,7 +246,7 @@ struct TimelineView: View {
             )
             .toolbar(.hidden, for: .navigationBar)
             .refreshable {
-                await session.refreshLibrary(showError: true)
+                await session.refreshLibrary(showError: false)
             }
             .sheet(isPresented: $showSettings) {
                 NavigationStack { SettingsContent() }
@@ -520,7 +529,12 @@ struct MasonryGrid: View {
     var onOpenWork: (LocalWork) -> Void = { _ in }
 
     private var sortedWorks: [LocalWork] {
-        works.sorted { $0.capturedAt > $1.capturedAt }
+        works.sorted { left, right in
+            if left.capturedAt != right.capturedAt {
+                return left.capturedAt > right.capturedAt
+            }
+            return left.createdAt > right.createdAt
+        }
     }
 
     var body: some View {

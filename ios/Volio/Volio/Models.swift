@@ -452,7 +452,9 @@ final class VolioSession {
     }
 
     func refreshLibrary(showError: Bool = false) async {
-        loadFromSwiftData()
+        if works.isEmpty {
+            loadFromSwiftData()
+        }
         if isMacPaired {
             await refreshMacLibrary(showError: showError, force: true)
         }

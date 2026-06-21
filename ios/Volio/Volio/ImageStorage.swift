@@ -207,23 +207,27 @@ struct CachedArtworkImage: View {
 
     @Environment(\.displayScale) private var displayScale
     @State private var image: UIImage?
+    @State private var displayedKey = ""
     @State private var loadKey = ""
 
     var body: some View {
-        Group {
-            if let image {
+        ZStack {
+            Rectangle()
+                .fill(.black.opacity(0.06))
+                .overlay {
+                    Image(systemName: "photo")
+                        .foregroundStyle(VolioTheme.mutedInk.opacity(0.34))
+                }
+                .opacity(image == nil || displayedKey != key ? 1 : 0)
+
+            if let image, displayedKey == key {
                 Image(uiImage: image)
                     .resizable()
                     .aspectRatio(contentMode: contentMode)
-            } else {
-                Rectangle()
-                    .fill(.black.opacity(0.06))
-                    .overlay {
-                        Image(systemName: "photo")
-                            .foregroundStyle(VolioTheme.mutedInk.opacity(0.34))
-                    }
+                    .transition(.opacity)
             }
         }
+        .animation(.easeOut(duration: 0.22), value: displayedKey)
         .task(id: key) {
             await load()
         }
@@ -240,9 +244,9 @@ struct CachedArtworkImage: View {
 
     @MainActor
     private func load() async {
-        guard loadKey != key else { return }
-        loadKey = key
-        image = nil
+        let requestedKey = key
+        guard loadKey != requestedKey || displayedKey != requestedKey else { return }
+        loadKey = requestedKey
         let pixelSize = CGSize(
             width: max(80, targetSize.width * displayScale),
             height: max(80, targetSize.height * displayScale)
@@ -253,8 +257,11 @@ struct CachedArtworkImage: View {
             originalPath: originalPath,
             targetPixelSize: pixelSize
         ) else { return }
-        guard loadKey == key, !Task.isCancelled else { return }
-        image = result.image
+        guard loadKey == requestedKey, !Task.isCancelled else { return }
+        withAnimation(.easeOut(duration: 0.22)) {
+            image = result.image
+            displayedKey = requestedKey
+        }
         onMetadata(result.metadata)
     }
 }
